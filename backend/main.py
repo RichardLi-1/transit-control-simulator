@@ -1,27 +1,126 @@
-"""FastAPI surface: topology + live sim state + manual commands."""
+"""FastAPI surface: topology + live sim state + manual commands.
+
+The simulation runs on a background thread started with the app (not at import, so tests and
+tools can import this module without a racing sim).  Every endpoint that reads or mutates sim
+state holds ``simulation.lock``, so /state is a consistent snapshot.
+"""
 
 from __future__ import annotations
 
-import json
+import logging
 import math
+import os
 import threading
 import time
+from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
 
 import commands as cmd_api
-import signal_atc
 import topology
 import train
-from events import registry as event_registry
-from route_geom import ROUTE_LEN_M, chainage_to_edge
-from stations import outbound_passenger_berths
 from dispatch_live import live_dispatch
+from events import registry as event_registry
 from sim import DT, simulation
 
-app = FastAPI()
+MAX_STEPS_PER_WAKE = 200        # bound lock hold / catch-up work per loop iteration
+MAX_BACKLOG_WALL_S = 1.0        # if we fall further behind than this, drop the backlog
+SPEED_MIN, SPEED_MAX = 0.1, 20.0  # public endpoint: any visitor can set it
+STALL_AFTER_S = 10.0            # /health: no step for this long while running → unhealthy
+
+log = logging.getLogger("cbtc.main")
+
+_stop = threading.Event()
+_thread: threading.Thread | None = None
+_loop_state = {"last_step_wall": None, "errors": 0, "last_error": None, "started": False}
+
+
+def _sim_loop() -> None:
+    """Drift-free real-time loop: sim time tracks wall time × speed (anchored, so compute time
+    and sleep jitter don't accumulate).  Re-anchors on pause/resume/speed change, and drops
+    backlog if the host can't keep up."""
+    anchor_wall = time.monotonic()
+    anchor_sim = simulation._sim_time_s
+    last_speed = simulation.speed
+    was_paused = simulation.paused
+    while not _stop.is_set():
+        speed = float(simulation.speed)
+        if not math.isfinite(speed) or speed <= 0:
+            speed = simulation.speed = 1.0
+        paused = simulation.paused
+        if paused or speed != last_speed or paused != was_paused:
+            anchor_wall = time.monotonic()
+            anchor_sim = simulation._sim_time_s
+            last_speed, was_paused = speed, paused
+            if paused:
+                time.sleep(0.05)
+                continue
+        target = anchor_sim + (time.monotonic() - anchor_wall) * speed
+        n = 0
+        while simulation._sim_time_s + DT * 0.5 <= target and n < MAX_STEPS_PER_WAKE:
+            try:
+                with simulation.lock:
+                    simulation.step(DT)
+                _loop_state["last_step_wall"] = time.monotonic()
+            except Exception as exc:     # one bad tick must never kill the sim thread
+                _loop_state["errors"] += 1
+                _loop_state["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
+                log.exception("sim step failed (continuing)")
+                time.sleep(0.05)
+                break
+            n += 1
+        behind = target - simulation._sim_time_s
+        if behind > MAX_BACKLOG_WALL_S * speed:
+            anchor_wall = time.monotonic()
+            anchor_sim = simulation._sim_time_s
+            behind = 0.0
+        # Sleep until the next step is due.
+        wait = (simulation._sim_time_s + DT - target) / speed
+        time.sleep(min(max(wait, 0.001), 0.1))
+
+
+def start_sim_thread() -> None:
+    global _thread
+    if _thread is not None and _thread.is_alive():
+        return
+    _stop.clear()
+    _loop_state["started"] = True
+    _loop_state["last_step_wall"] = time.monotonic()
+    _thread = threading.Thread(target=_sim_loop, name="sim-loop", daemon=True)
+    _thread.start()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if os.environ.get("SIM_AUTOSTART", "1") not in ("0", "false", "no"):
+        start_sim_thread()
+    yield
+    _stop.set()
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(_request, exc: RequestValidationError):
+    """422 with the offending input sanitised: the default handler echoes the input back and
+    crashes (500) when it is NaN / Infinity, which are not valid JSON."""
+    return JSONResponse(status_code=422, content={"detail": train._json_safe(jsonable_encoder_safe(exc.errors()))})
+
+
+def jsonable_encoder_safe(obj):
+    if isinstance(obj, dict):
+        return {str(k): jsonable_encoder_safe(v) for k, v in obj.items() if k != "ctx"}
+    if isinstance(obj, (list, tuple)):
+        return [jsonable_encoder_safe(v) for v in obj]
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return str(obj)
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,8 +128,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-_EDGES = {e["id"]: e for e in topology.YUS_TOPOLOGY["edges"]}
 
 
 class SwitchCommandBody(BaseModel):
@@ -51,68 +148,44 @@ class DispatchPolicyBody(BaseModel):
 
 
 class SimControlBody(BaseModel):
-    action: str | None = None  # "pause" | "resume"
-    speed: float | None = None  # wall-clock multiplier, e.g. 2.0
+    action: Optional[str] = None  # "pause" | "resume"
+    # wall-clock multiplier; must be finite (NaN/Infinity → 422); clamped to [0.1, 20]
+    speed: Optional[float] = Field(default=None, allow_inf_nan=False)
 
 
 class InjectEventBody(BaseModel):
-    kind: str
-    duration_s: float = 30.0
-    starts_in_s: float = 0.0
-    target_train_id: str | None = None
-    target_signal_id: str | None = None
-    target_switch_id: str | None = None
-    speed_limit_kph: float | None = None
-    note: str = ""
-
-
-def _json_float(value: float | None) -> float | None:
-    if value is None:
-        return None
-    if math.isinf(value) or math.isnan(value):
-        return None
-    return float(value)
-
-
-# Spread initial roster around the loop
-if train.lines and train.lines[0].trains:
-    roster = train.lines[0].trains
-    ato_berths = outbound_passenger_berths()
-    n_berths = len(ato_berths)
-
-    def _nearest_stop_index(chainage_m: float) -> int:
-        if not ato_berths:
-            return 0
-        return min(
-            range(len(ato_berths)),
-            key=lambda idx: min(
-                abs(chainage_m - ato_berths[idx].chainage_m),
-                ROUTE_LEN_M - abs(chainage_m - ato_berths[idx].chainage_m),
-            ),
-        )
-
-    # Spread the opening roster around the loop so they are not piled on the yard.
-    for i, t in enumerate(roster):
-        t.chainage_front_m = ROUTE_LEN_M * (i + 0.5) / max(len(roster), 1)
-        t.speed = 25.0
-        t.stop_index = _nearest_stop_index(t.chainage_front_m)
-        t.dwell_remaining_sec = 0.0
-
-
-def _sim_loop() -> None:
-    while True:
-        if not simulation.paused:
-            simulation.step(DT)
-        # speed=2.0 sleeps half as long, so the sim advances twice as fast.
-        time.sleep(DT / max(simulation.speed, 0.1))
-
-
-threading.Thread(target=_sim_loop, daemon=True).start()
+    kind: str = Field(max_length=40)
+    duration_s: float = Field(default=30.0, ge=0.0, le=86_400.0, allow_inf_nan=False)
+    starts_in_s: float = Field(default=0.0, ge=0.0, le=86_400.0, allow_inf_nan=False)
+    target_train_id: Optional[str] = Field(default=None, max_length=16)
+    target_signal_id: Optional[str] = Field(default=None, max_length=64)
+    target_switch_id: Optional[str] = Field(default=None, max_length=64)
+    speed_limit_kph: Optional[float] = Field(default=None, ge=0.0, le=88.0, allow_inf_nan=False)
+    note: str = Field(default="", max_length=200)
 
 
 @app.get("/health")
 def health():
-    return {"ok": True, "lines": len(train.lines)}
+    """Liveness of the API *and* the sim thread.  503 if the thread was started but died or
+    has stopped stepping while not paused."""
+    alive = _thread is not None and _thread.is_alive()
+    last = _loop_state["last_step_wall"]
+    age = None if last is None else round(time.monotonic() - last, 2)
+    started = _loop_state["started"]
+    healthy = (not started) or (alive and (simulation.paused or age is None or age < STALL_AFTER_S))
+    body = {
+        "ok": healthy,
+        "lines": len(train.lines),
+        "sim_thread_started": started,
+        "sim_thread_alive": alive,
+        "sim_time_s": simulation._sim_time_s,
+        "last_step_age_s": age,
+        "paused": simulation.paused,
+        "speed": simulation.speed,
+        "step_errors": _loop_state["errors"] + simulation.step_errors,
+        "last_error": _loop_state["last_error"],
+    }
+    return JSONResponse(body, status_code=200 if healthy else 503)
 
 
 @app.get("/topology")
@@ -127,6 +200,7 @@ def get_sim():
         "paused": simulation.paused,
         "speed": simulation.speed,
         "sim_time_s": simulation._sim_time_s,
+        "step_s": DT,
     }
 
 
@@ -141,9 +215,11 @@ def post_sim_control(body: SimControlBody):
         else:
             raise HTTPException(status_code=400, detail="action must be 'pause' or 'resume'")
     if body.speed is not None:
-        if body.speed <= 0:
-            raise HTTPException(status_code=400, detail="speed must be > 0")
-        simulation.speed = float(body.speed)
+        if not math.isfinite(body.speed) or body.speed <= 0:
+            raise HTTPException(status_code=400, detail="speed must be a finite number > 0")
+        simulation.speed = float(min(max(body.speed, SPEED_MIN), SPEED_MAX))
+    with simulation.lock:
+        simulation.touch()
     return {"ok": True, "paused": simulation.paused, "speed": simulation.speed}
 
 
@@ -166,7 +242,9 @@ def get_dispatch_policy():
 @app.post("/commands/switch/{switch_id}")
 def post_switch_command(switch_id: str, body: SwitchCommandBody):
     try:
-        cmd_api.set_switch(switch_id, body.state)
+        with simulation.lock:
+            cmd_api.set_switch(switch_id, body.state)
+            simulation.touch()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -177,19 +255,21 @@ def post_switch_command(switch_id: str, body: SwitchCommandBody):
 @app.post("/events/inject")
 def post_inject_event(body: InjectEventBody):
     try:
-        inc = event_registry.inject(
-            lines=train.lines,
-            kind=body.kind,
-            sim_time_s=simulation._sim_time_s,
-            duration_s=body.duration_s,
-            starts_in_s=body.starts_in_s,
-            target_train_id=body.target_train_id,
-            target_signal_id=body.target_signal_id,
-            target_switch_id=body.target_switch_id,
-            speed_limit_kph=body.speed_limit_kph,
-            note=body.note,
-            source="manual",
-        )
+        with simulation.lock:
+            inc = event_registry.inject(
+                lines=train.lines,
+                kind=body.kind,
+                sim_time_s=simulation._sim_time_s,
+                duration_s=body.duration_s,
+                starts_in_s=body.starts_in_s,
+                target_train_id=body.target_train_id,
+                target_signal_id=body.target_signal_id,
+                target_switch_id=body.target_switch_id,
+                speed_limit_kph=body.speed_limit_kph,
+                note=body.note,
+                source="manual",
+            )
+            simulation.touch()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
@@ -210,7 +290,9 @@ def post_inject_event(body: InjectEventBody):
 @app.delete("/events/{event_id}")
 def delete_event(event_id: str):
     try:
-        event_registry.cancel(event_id, lines=train.lines, sim_time_s=simulation._sim_time_s)
+        with simulation.lock:
+            event_registry.cancel(event_id, lines=train.lines, sim_time_s=simulation._sim_time_s)
+            simulation.touch()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"ok": True}
@@ -219,7 +301,9 @@ def delete_event(event_id: str):
 @app.post("/commands/train/{train_id}")
 def post_train_command(train_id: str, body: TrainDispatchBody):
     try:
-        cmd_api.set_train_dispatch(train_id, body.action, body.count)
+        with simulation.lock:
+            cmd_api.set_train_dispatch(train_id, body.action, body.count)
+            simulation.touch()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -230,7 +314,9 @@ def post_train_command(train_id: str, body: TrainDispatchBody):
 @app.post("/commands/signal/{signal_id}")
 def post_signal_command(signal_id: str, body: SignalCommandBody):
     try:
-        cmd_api.set_signal(signal_id, body.aspect)
+        with simulation.lock:
+            cmd_api.set_signal(signal_id, body.aspect)
+            simulation.touch()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -238,97 +324,19 @@ def post_signal_command(signal_id: str, body: SignalCommandBody):
     return {"ok": True, "signal_id": signal_id, "aspect": body.aspect}
 
 
+def get_state() -> dict:
+    """/state payload as a dict (tests / tools)."""
+    with simulation.lock:
+        payload = simulation.snapshot()
+    payload["timestamp"] = time.time()
+    return payload
+
+
 @app.get("/state")
-def get_state():
-    raw = json.loads(train.getState())
-
-    trains_out = []
-    for line_data in raw:
-        for t in line_data["trains"]:
-            eid, offset = chainage_to_edge(t["chainage_front_m"])
-            speed_kph = float(t["speed"])
-            speed_mps = speed_kph / 3.6
-            brake_dist = (speed_mps**2) / (2.0 * 1.5)
-            slack = _json_float(float(t.get("atp_slack_m") or 0.0))
-            dwell = float(t.get("dwell_remaining_sec") or 0.0)
-            if dwell > 0 or t.get("at_station_name"):
-                run_state = "dwelling"
-            elif speed_kph < 12.0:
-                run_state = "arriving"
-            else:
-                run_state = "running"
-            # Synthetic passenger load: morning peak rises, mid-day plateau, evening peak.
-            # Deterministic per-train so the tooltip doesn't strobe between polls.
-            run_num = int(t.get("run_number") or 0)
-            tod = (simulation._sim_time_s % (12 * 3600)) / 3600.0  # 0..12h cycle
-            peak = math.exp(-((tod - 2.0) ** 2) / 1.5) + 0.8 * math.exp(-((tod - 9.0) ** 2) / 2.0)
-            base_load = 0.18 + 0.65 * min(1.0, peak)
-            jitter = (math.sin(run_num * 1.7) + 1.0) * 0.06
-            load_pct = max(0.0, min(1.0, base_load + jitter - 0.08))
-            # Toronto Rocket capacity: ~1100 (seated + standees / 6-car consist).
-            tr_capacity = 1100
-            passengers = int(round(tr_capacity * load_pct))
-
-            trains_out.append(
-                {
-                    "train_id": f"T{t['run_number']:02d}",
-                    "label": f"Run {int(t['run_number'])}",
-                    "edge_id": eid,
-                    "offset": offset,
-                    "speed": speed_mps,
-                    "state": run_state,
-                    "station_name": t.get("at_station_name") or None,
-                    "dwell_remaining_sec": dwell,
-                    "safe_zone_front": max(10.0 + brake_dist, float(t.get("required_gap_m", 0))),
-                    "safe_zone_rear": float(t.get("length_m", 138.0)),
-                    "atp_slack_m": slack,
-                    "authority_eoa_m": _json_float(float(t["authority_eoa_m"])) if t.get("authority_eoa_m") is not None else None,
-                    "fleet": "Bombardier TR",
-                    "passengers": passengers,
-                    "passenger_capacity": tr_capacity,
-                    "load_pct": round(load_pct, 3),
-                    "dispatch_hold": bool(t.get("op_hold")),
-                    "dispatch_express": bool(t.get("op_express")),
-                    "dispatch_skip_remaining": int(t.get("op_skip_remaining") or 0),
-                }
-            )
-
-    occupied = {_EDGES[t["edge_id"]]["block_id"] for t in trains_out if t["edge_id"] in _EDGES}
-
-    blocks = [
-        {"block_id": bid, "occupancy": "occupied" if bid in occupied else "clear"}
-        for bid in {e["block_id"] for e in topology.YUS_TOPOLOGY["edges"]}
-    ]
-
-    switches = [
-        {"switch_id": sw["id"], "state": cmd_api.switch_state(sw["id"], sw["state"])}
-        for sw in topology.YUS_TOPOLOGY["switches"]
-    ]
-
-    aspects = signal_atc.compute_aspects(occupied)
-    signals = [
-        {
-            "signal_id": sig["id"],
-            "aspect": cmd_api.signal_aspect(sig["id"], aspects.get(sig["id"], "green")),
-        }
-        for sig in topology.YUS_TOPOLOGY["signals"]
-    ]
-
-    line0 = train.lines[0] if train.lines else None
-    dispatch = simulation.dispatch_status(line0) if line0 is not None else None
-
-    ops: dict = {}
-    if dispatch is not None:
-        ops["dispatch"] = dispatch
-    ops["injected_events"] = event_registry.active_payload()
-    ops["event_log"] = event_registry.recent_log()
-
-    return {
-        "trains": trains_out,
-        "blocks": blocks,
-        "switches": switches,
-        "signals": signals,
-        "ops": ops,
-        "sim_time_s": simulation._sim_time_s,
-        "timestamp": time.time(),
-    }
+def get_state_http() -> Response:
+    """Polled by every visitor at ~5 Hz: the body is encoded once per sim step (cached bytes),
+    only the wall-clock timestamp is appended per request."""
+    with simulation.lock:
+        body = simulation.snapshot_json()
+    body = body[:-1] + b',"timestamp":' + repr(time.time()).encode() + b"}"
+    return Response(content=body, media_type="application/json")

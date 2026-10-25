@@ -16,25 +16,38 @@ _signal_overrides: dict[str, SignalAspect] = {}
 
 
 def set_switch(switch_id: str, state: str) -> None:
-    if state not in ("normal", "reverse"):
+    """Operator points control.  'normal' / 'reverse' hold the points there (routes that need
+    the other position cannot be set); 'auto' hands them back to the interlocking."""
+    if state not in ("normal", "reverse", "auto"):
         raise ValueError(f"invalid switch state: {state!r}")
+    sw = next((s for s in topology.YUS_TOPOLOGY["switches"] if s["id"] == switch_id), None)
+    if sw is None:
+        raise KeyError(f"unknown switch_id: {switch_id!r}")
+    if state == "auto":
+        _switch_overrides.pop(switch_id, None)
+        sw["state"] = "normal"
+        return
     _switch_overrides[switch_id] = state  # type: ignore[assignment]
-    for sw in topology.YUS_TOPOLOGY["switches"]:
-        if sw["id"] == switch_id:
-            sw["state"] = state
-            return
-    raise KeyError(f"unknown switch_id: {switch_id!r}")
+    sw["state"] = state
 
 
 def set_signal(signal_id: str, aspect: str) -> None:
-    if aspect not in ("red", "yellow", "green"):
+    """Operator signal control.  'red' = hold at stop; 'green'/'yellow' = call-on (moving
+    block still protects); 'auto' = clear the override."""
+    if aspect not in ("red", "yellow", "green", "auto"):
         raise ValueError(f"invalid signal aspect: {aspect!r}")
+    sig = next((s for s in topology.YUS_TOPOLOGY["signals"] if s["id"] == signal_id), None)
+    if sig is None:
+        raise KeyError(f"unknown signal_id: {signal_id!r}")
+    if aspect == "auto":
+        clear_signal_override(signal_id)
+        return
+    if sig.get("kind") == "yard_exit" and aspect in ("green", "yellow"):
+        # A yard-exit signal only clears when the dispatcher inserts a train (there is no
+        # train waiting on the lead to call on).  Holding it at red is allowed.
+        raise ValueError("yard exit signals clear only for a train entering service; use 'red' or 'auto'")
     _signal_overrides[signal_id] = aspect  # type: ignore[assignment]
-    for sig in topology.YUS_TOPOLOGY["signals"]:
-        if sig["id"] == signal_id:
-            sig["aspect"] = aspect
-            return
-    raise KeyError(f"unknown signal_id: {signal_id!r}")
+    sig["aspect"] = aspect
 
 
 def switch_state(switch_id: str, default: str) -> str:
@@ -47,6 +60,20 @@ def signal_aspect(signal_id: str, computed: str) -> str:
 
 def clear_signal_override(signal_id: str) -> None:
     _signal_overrides.pop(signal_id, None)
+    for sig in topology.YUS_TOPOLOGY["signals"]:
+        if sig["id"] == signal_id:
+            sig["aspect"] = "red"      # interlocking signals are normally at stop
+            break
+
+
+def reset_overrides() -> None:
+    """Drop every operator override (tests / sim reset)."""
+    _signal_overrides.clear()
+    _switch_overrides.clear()
+    for sw in topology.YUS_TOPOLOGY["switches"]:
+        sw["state"] = "normal"
+    for sig in topology.YUS_TOPOLOGY["signals"]:
+        sig["aspect"] = "red"
 
 
 def _find_train(train_id: str):
