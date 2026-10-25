@@ -68,19 +68,6 @@ export function boundsUnion(a: Bounds, b: Bounds): Bounds {
   }
 }
 
-/** True if the screen-space point (sx, sy) is within radius of world point projected to screen. */
-export function hitTestPoint(
-  wx: number, wy: number,
-  sx: number, sy: number,
-  worldToScreen: (wx: number, wy: number) => [number, number],
-  radius: number,
-): boolean {
-  const [px, py] = worldToScreen(wx, wy)
-  const dx = px - sx
-  const dy = py - sy
-  return dx * dx + dy * dy <= radius * radius
-}
-
 /** Distance from point P to line segment AB, all in the same space. */
 export function distPointToSegment(p: Vec2, a: Vec2, b: Vec2): number {
   const abx = b.x - a.x, aby = b.y - a.y

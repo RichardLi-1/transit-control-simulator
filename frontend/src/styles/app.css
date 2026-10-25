@@ -1,0 +1,199 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/*
+ * Operations-console theme for shadcn/ui. Dark only; `.hc` on <html> is the high-contrast variant
+ * (uiStore.setHighContrast toggles it together with the canvas palette in constants/colors.ts).
+ * Flat: 1px borders, small radii, no shadows, no blur. Colour is reserved for status
+ * (ok / caution / danger / info) and Line 1 identity.
+ */
+
+@custom-variant dark (&:is(.dark *));
+@custom-variant hc (&:is(.hc *));
+
+@theme {
+  /* No elevation anywhere: separation comes from borders. */
+  --shadow-*: initial;
+  --inset-shadow-*: initial;
+  --drop-shadow-*: initial;
+
+  /* Compact type scale: 11 / 12 / 13 px. */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.25rem;
+}
+
+@theme inline {
+  --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-heading: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-highlight: var(--highlight);
+
+  --color-ok: var(--ok);
+  --color-caution: var(--caution);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+  --color-line-1: var(--line-1);
+  --color-line-1-foreground: var(--line-1-foreground);
+
+  --radius-xs: calc(var(--radius) * 0.5);
+  --radius-sm: calc(var(--radius) * 0.75);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.5);
+  --radius-2xl: calc(var(--radius) * 2);
+  --radius-3xl: calc(var(--radius) * 2);
+  --radius-4xl: calc(var(--radius) * 2);
+}
+
+:root {
+  color-scheme: dark;
+  --radius: 0.25rem;
+
+  /* zinc neutrals */
+  --background: #09090b;          /* zinc-950: app + map */
+  --foreground: #f4f4f5;          /* zinc-100 */
+  --card: #111113;                /* chrome surfaces: top bar, inspector, status bar */
+  --card-foreground: #f4f4f5;
+  --popover: #18181b;             /* zinc-900: menus, hover card, dialogs */
+  --popover-foreground: #f4f4f5;
+  --primary: #e4e4e7;             /* zinc-200: the one filled button style */
+  --primary-foreground: #09090b;
+  --secondary: #27272a;
+  --secondary-foreground: #f4f4f5;
+  --muted: #1c1c1f;
+  --muted-foreground: #a1a1aa;    /* zinc-400 */
+  --faint: #71717a;               /* zinc-500: micro-labels, units */
+  --accent: #232326;              /* hover / pressed fill */
+  --accent-foreground: #f4f4f5;
+  --border: #27272a;              /* zinc-800 */
+  --border-strong: #3f3f46;       /* zinc-700 */
+  --input: #3f3f46;
+  --ring: #3bb1ce;
+  /* The single UI accent: selection, focus, toggled-on. */
+  --highlight: #3bb1ce;
+
+  /* status only */
+  --ok: #3dbb7e;
+  --caution: #f2a93b;
+  --danger: #f0575c;
+  --destructive: #f0575c;
+  --info: #3bb1ce;
+
+  /* line identity only */
+  --line-1: #ffcd00;
+  --line-1-foreground: #16130a;
+}
+
+/* High contrast: pure black, white text, strong borders, saturated status colours. */
+.hc {
+  --background: #000000;
+  --foreground: #ffffff;
+  --card: #000000;
+  --card-foreground: #ffffff;
+  --popover: #000000;
+  --popover-foreground: #ffffff;
+  --primary: #ffffff;
+  --primary-foreground: #000000;
+  --secondary: #1f1f1f;
+  --secondary-foreground: #ffffff;
+  --muted: #141414;
+  --muted-foreground: #f0f0f0;
+  --faint: #d4d4d4;
+  --accent: #2e2e2e;
+  --accent-foreground: #ffffff;
+  --border: #bdbdbd;
+  --border-strong: #ffffff;
+  --input: #ffffff;
+  --ring: #ffd400;
+  --highlight: #ffd400;
+  --ok: #33f08a;
+  --caution: #ffc21a;
+  --danger: #ff5c5c;
+  --destructive: #ff5c5c;
+  --info: #40d0f0;
+  --line-1: #ffd400;
+  --line-1-foreground: #000000;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/60;
+  }
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+  html {
+    @apply font-sans;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-background text-sm text-foreground;
+  }
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--highlight) 35%, transparent);
+  }
+}
+
+@layer utilities {
+  /* Data readouts: clocks, ids, distances. */
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums slashed-zero;
+  }
+  /* Uppercase micro-label, used sparingly for section heads and column heads. */
+  .micro {
+    font-size: 0.65625rem;
+    line-height: 1rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

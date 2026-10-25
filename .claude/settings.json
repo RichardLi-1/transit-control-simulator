@@ -53,7 +53,10 @@
       "Bash(curl -s -o /tmp/prod.txt -w \"HTTP %{http_code}\\\\n\" -X POST https://transitcontrol.richardli.dev/api/track -H 'Content-Type: application/json' -d '{\"event\":\"✅ Webhook fix verification\",\"meta\":{\"source\":\"claude-code diagnostic\"}}')",
       "Bash(echo \"===TSC EXIT $?===\")",
       "Bash(git check-ignore *)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(python3 -c ' *)",
+      "Bash(timeout 60 ./venv/bin/python -c ' *)",
+      "Bash(DISPATCH_ML_DISABLED=1 ./venv/bin/python -c ' *)"
     ]
   }
 }

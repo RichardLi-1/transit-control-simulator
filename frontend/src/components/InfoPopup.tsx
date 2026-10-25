@@ -1,5 +1,7 @@
-import { useEffect } from 'react'
-import { COLORS } from '../constants/colors'
+import type { ReactNode } from 'react'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Kbd, KbdGroup } from '@/components/ui/kbd'
+import { ScrollArea } from '@/components/ui/scroll-area'
 
 interface Props {
   open: boolean
@@ -7,98 +9,82 @@ interface Props {
 }
 
 export function InfoPopup({ open, onClose }: Props) {
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
-
-  if (!open) return null
-
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.55)',
-        zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: 560, maxHeight: '80vh', overflowY: 'auto',
-          background: COLORS.PANEL_BG,
-          border: `1px solid ${COLORS.PANEL_BORDER}`,
-          color: COLORS.PANEL_TEXT,
-          fontFamily: 'monospace',
-          fontSize: 12,
-          lineHeight: 1.55,
-          padding: '18px 22px',
-          borderRadius: 4,
-          boxShadow: '0 8px 28px rgba(0,0,0,0.6)',
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
-          <span style={{ fontSize: 13, letterSpacing: '0.1em', color: COLORS.PANEL_TEXT }}>
-            URBALIS 400 — REFERENCE NOTES
+    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose() }}>
+      <DialogContent className="flex max-h-[min(86dvh,720px)] flex-col gap-0 p-0 sm:max-w-xl">
+        <DialogHeader className="gap-1 border-b px-4 py-3">
+          <DialogTitle className="text-sm">About this simulator</DialogTitle>
+          <DialogDescription className="text-xs">TTC Line 1 on Alstom Urbalis 400 CBTC, simplified.</DialogDescription>
+        </DialogHeader>
+
+        <ScrollArea className="min-h-0 flex-1">
+          <div className="flex flex-col gap-4 px-4 py-4 text-xs leading-relaxed text-muted-foreground">
+            <Section title="The real system">
+              <p>
+                Line 1 (Yonge–University) runs on Urbalis 400, a moving-block CBTC. Trains report their position
+                to wayside zone controllers over radio. ATS regulates service; wayside ATP grants each train a{' '}
+                <span className="text-foreground">movement authority</span>, the point it may travel up to, and onboard
+                ATO drives within it. Interlockings with lineside signals remain at crossovers and terminals.
+              </p>
+            </Section>
+
+            <Section title="Reading the board">
+              <Defs>
+                <Def k="Line diagram">Vaughan MC to Finch. Spacing follows real distance, compressed so every station stays readable. Switch to Map for true geography.</Def>
+                <Def k="Trains">Coloured by state: running, at a platform, stopped, emergency brake. The band ahead is the movement authority (Safe zones).</Def>
+                <Def k="Signals">Only at interlockings. The head points the way trains run on that track.</Def>
+                <Def k="Amber underlay">Permanent speed limits: curves, terminal approaches.</Def>
+              </Defs>
+            </Section>
+
+            <Section title="What is modelled">
+              <Defs>
+                <Def k="Topology">Track graph, stations, crossovers, yards and civil speed limits.</Def>
+                <Def k="Trains">Each train integrates its own traction and braking in real metres along the route.</Def>
+                <Def k="Control">ATP issues authorities, ATO follows them, dispatch regulates headways (rule-based or an ML policy).</Def>
+                <Def k="Operator">Hold, express, skip, signal and switch commands, injected disruptions.</Def>
+              </Defs>
+            </Section>
+
+            <Section title="Simplifications">
+              <p>
+                No radio-loss model, no SIL-rated voting or interlocking proofs. Occupancy comes from train
+                positions rather than axle counters. Braking curves and headways are tuned for legibility, not
+                certification.
+              </p>
+            </Section>
+          </div>
+        </ScrollArea>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t px-4 py-2.5 text-[11px] text-faint">
+          <span>Recreational simulator. Not affiliated with the TTC or Alstom.</span>
+          <span className="flex items-center gap-1">
+            Sim config <KbdGroup><Kbd>Ctrl</Kbd><Kbd>Shift</Kbd><Kbd>C</Kbd></KbdGroup>
           </span>
-          <span
-            onClick={onClose}
-            style={{ cursor: 'pointer', color: COLORS.PANEL_TEXT_DIM, fontSize: 14 }}
-            title="Close (Esc)"
-          >✕</span>
         </div>
-
-        <Section title="THE REAL SYSTEM">
-          TTC Line 1 (Yonge–University) runs on Alstom <b>Urbalis 400</b>, a
-          moving-block CBTC. Each train continuously reports its position to
-          wayside zone controllers over a track-side radio network. A central
-          ATS layer handles regulation and timetable; wayside ATP issues a
-          <b> movement authority</b> (MA) — the limit of authority a train may
-          travel to — and an onboard ATO follows it within the speed envelope.
-          Fixed track circuits remain as a fallback for SIL-4 protection.
-        </Section>
-
-        <Section title="WHAT WE MODEL">
-          <Row k="Topology" v="Static track graph (edges, switches, stations) loaded from /topology." />
-          <Row k="Train state" v="Owns its own speed/position. Integrates traction & braking each tick." />
-          <Row k="Controller" v="Wayside-style. Pushes setpoints (target speed, direction) via a narrow command API." />
-          <Row k="Movement authority" v="Per-train safe zone: permitted speed + forward/rear extent. Rendered as the green/orange band." />
-          <Row k="Driver" v="Minimal — emergency brake only. EB overrides controller setpoints until released." />
-        </Section>
-
-        <Section title="SIMPLIFICATIONS">
-          No radio loss model, no SIL-rated voting, no track-circuit fallback,
-          no interlocking proofs. Block occupancy is derived from train
-          positions directly rather than from axle counters. Headways and
-          braking curves are tuned for legibility, not certification.
-        </Section>
-
-        <div style={{ marginTop: 14, paddingTop: 10, borderTop: `1px solid ${COLORS.PANEL_BORDER}`, color: COLORS.PANEL_TEXT_DIM, fontSize: 10 }}>
-          Recreational simulator. Not affiliated with TTC or Alstom.
-        </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 10, letterSpacing: '0.12em', marginBottom: 6 }}>
-        {title}
-      </div>
-      <div>{children}</div>
-    </div>
+    <section>
+      <h3 className="micro mb-1.5">{title}</h3>
+      {children}
+    </section>
   )
 }
 
-function Row({ k, v }: { k: string; v: string }) {
+function Defs({ children }: { children: ReactNode }) {
+  return <dl className="flex flex-col gap-1.5">{children}</dl>
+}
+
+function Def({ k, children }: { k: string; children: ReactNode }) {
   return (
-    <div style={{ display: 'flex', gap: 10, marginBottom: 3 }}>
-      <span style={{ color: COLORS.SIGNAL_GREEN, minWidth: 130 }}>{k}</span>
-      <span style={{ color: COLORS.PANEL_TEXT }}>{v}</span>
+    <div className="grid gap-x-3 sm:grid-cols-[112px_1fr]">
+      <dt className="text-foreground">{k}</dt>
+      <dd>{children}</dd>
     </div>
   )
 }

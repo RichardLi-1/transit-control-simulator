@@ -20,7 +20,6 @@ const MAX_EVENTS = 200
 interface EventsStore {
   events: SimEvent[]
   paused: boolean
-  panelOpen: boolean
   injectOpen: boolean
   /** Routine signal flips stay out of the list unless this is on. */
   showSignals: boolean
@@ -28,21 +27,14 @@ interface EventsStore {
   clear: () => void
   togglePaused: () => void
   toggleShowSignals: () => void
-  setPanelOpen: (v: boolean) => void
   setInjectOpen: (v: boolean) => void
 }
 
 let _nextId = 1
 
-// Collapse the events panel by default on phone-sized screens so it doesn't
-// cover the canvas. Resolved once at init to keep the first paint stable (an
-// open→closed flip after mount would register as layout shift).
-const _startCollapsed = true
-
 export const useEventsStore = create<EventsStore>((set, get) => ({
   events: [],
   paused: false,
-  panelOpen: !_startCollapsed,
   injectOpen: false,
   showSignals: false,
   append: (e) => {
@@ -61,7 +53,6 @@ export const useEventsStore = create<EventsStore>((set, get) => ({
   clear: () => set({ events: [] }),
   togglePaused: () => set((s) => ({ paused: !s.paused })),
   toggleShowSignals: () => set((s) => ({ showSignals: !s.showSignals })),
-  setPanelOpen: (v) => set({ panelOpen: v }),
   setInjectOpen: (v) => set({ injectOpen: v }),
 }))
 

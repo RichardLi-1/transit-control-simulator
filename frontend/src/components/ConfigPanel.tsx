@@ -1,53 +1,83 @@
 /**
- * Hidden config panel — toggle with Ctrl+Shift+C.
- * Manages rolling stock profiles, headway targets, and event injection.
+ * Hidden sim config (Ctrl+Shift+C): dev mode, RL training, operations targets, rolling stock,
+ * scheduled event injection. A non-modal sheet so the map keeps running behind it.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
+import { X } from 'lucide-react'
 import { useRuntimeStore } from '../store/runtimeStore'
 import { useUiStore } from '../store/uiStore'
 import { useTrainingStore } from '../store/trainingStore'
-import { COLORS } from '../constants/colors'
 import { cancelEvent, injectEvent } from '../api/client'
 import { isMlEnabled } from '../config/ml'
 import type { EventKind, RollingStockProfile } from '../types/domain'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Input } from '@/components/ui/input'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
+import { Slider } from '@/components/ui/slider'
+import { Switch } from '@/components/ui/switch'
+import { Kbd, KbdGroup } from '@/components/ui/kbd'
 
 const EVENT_KINDS: EventKind[] = ['emergency_brake', 'door_fault', 'slow_speed', 'signal_fail', 'station_hold']
+const TRAINING_CONFIGS = ['ppo_smoke.yaml', 'ppo_baseline.yaml', 'rule_based_smoke.yaml']
 
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
+function Group({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-      <span style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 11, fontFamily: 'monospace', width: 140, flexShrink: 0 }}>{label}</span>
+    <section className="flex flex-col gap-1 border-b px-4 py-3">
+      <h3 className="micro mb-1">{title}</h3>
       {children}
+    </section>
+  )
+}
+
+function Row({ label, children, hint }: { label: string; children: ReactNode; hint?: ReactNode }) {
+  return (
+    <div className="flex min-h-7 items-center gap-3 text-xs">
+      <span className="w-32 shrink-0 text-muted-foreground">{label}</span>
+      <div className="flex min-w-0 flex-1 items-center gap-2">{children}</div>
+      {hint && <span className="num shrink-0 text-[11px] text-faint">{hint}</span>}
     </div>
   )
 }
 
 function NumInput({ value, min, max, step, onChange }: { value: number; min: number; max: number; step: number; onChange: (v: number) => void }) {
   return (
-    <input
+    <Input
       type="number"
       value={value}
       min={min}
       max={max}
       step={step}
-      onChange={e => onChange(Number(e.target.value))}
-      style={{
-        width: 70,
-        background: COLORS.BUTTON_BG,
-        color: COLORS.PANEL_TEXT,
-        border: `1px solid ${COLORS.PANEL_BORDER}`,
-        borderRadius: 3,
-        padding: '2px 5px',
-        fontFamily: 'monospace',
-        fontSize: 11,
-      }}
+      onChange={(e) => onChange(Number(e.target.value))}
+      className="num h-7 w-20 px-2"
     />
   )
 }
 
-const TRAINING_CONFIGS = ['ppo_smoke.yaml', 'ppo_baseline.yaml', 'rule_based_smoke.yaml']
+function Pick<T extends string>({ value, options, onChange, disabled, placeholder, className }: {
+  value: T | ''
+  options: { value: T; label: string }[]
+  onChange: (v: T) => void
+  disabled?: boolean
+  placeholder?: string
+  className?: string
+}) {
+  return (
+    <Select value={value || undefined} onValueChange={(v) => onChange(v as T)} disabled={disabled}>
+      <SelectTrigger size="sm" className={className ?? 'w-full text-xs'}>
+        <SelectValue placeholder={placeholder} />
+      </SelectTrigger>
+      <SelectContent position="popper" className="max-h-64">
+        {options.map((o) => <SelectItem key={o.value} value={o.value} className="num text-xs">{o.label}</SelectItem>)}
+      </SelectContent>
+    </Select>
+  )
+}
 
-export function ConfigPanel({ open }: { open: boolean }) {
+export function ConfigPanel({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const { config, runtime, updateConfig } = useRuntimeStore()
   const { devMode, setDevMode } = useUiStore()
   const {
@@ -85,23 +115,16 @@ export function ConfigPanel({ open }: { open: boolean }) {
     return () => stopTrainingPoll()
   }, [open, refreshStatus, startTrainingPoll, stopTrainingPoll])
 
-  if (!open) return null
-
   const trainingRunning = Boolean(trainingStatus?.running)
   const done = trainingStatus?.completed_timesteps ?? 0
   const total = trainingStatus?.total_timesteps ?? 0
   const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0
 
-  const activeProfile: RollingStockProfile | undefined =
-    config.profiles.find(p => p.id === config.active_profile)
+  const activeProfile: RollingStockProfile | undefined = config.profiles.find((p) => p.id === config.active_profile)
 
   function patchProfile(patch: Partial<RollingStockProfile>) {
     if (!activeProfile) return
-    updateConfig({
-      profiles: config.profiles.map(p =>
-        p.id === activeProfile.id ? { ...p, ...patch } : p,
-      ),
-    })
+    updateConfig({ profiles: config.profiles.map((p) => (p.id === activeProfile.id ? { ...p, ...patch } : p)) })
   }
 
   async function addEvent() {
@@ -129,249 +152,153 @@ export function ConfigPanel({ open }: { open: boolean }) {
     }
   }
 
-  const panelStyle: React.CSSProperties = {
-    position: 'absolute',
-    top: 46,
-    right: 14,
-    width: 340,
-    background: COLORS.PANEL_BG,
-    border: `1px solid ${COLORS.PANEL_BORDER}`,
-    borderRadius: 5,
-    padding: '12px 16px',
-    zIndex: 200,
-    overflowY: 'auto',
-    maxHeight: 'calc(100vh - 70px)',
-  }
-
-  const section = (title: string) => (
-    <div style={{ color: COLORS.PANEL_TEXT, fontFamily: 'monospace', fontSize: 11, letterSpacing: '0.06em', borderBottom: `1px solid ${COLORS.PANEL_BORDER}`, paddingBottom: 4, marginBottom: 10, marginTop: 14 }}>
-      {title}
-    </div>
-  )
-
   return (
-    <div style={panelStyle}>
-      <div style={{ color: COLORS.PANEL_TEXT, fontFamily: 'monospace', fontSize: 13, marginBottom: 12 }}>
-        ⚙ SIM CONFIG <span style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 10 }}>(Ctrl+Shift+C)</span>
-      </div>
-
-      <Row label="Dev mode">
-        <button
-          type="button"
-          onClick={() => setDevMode(!devMode)}
-          style={{
-            background: devMode ? COLORS.BUTTON_ACTIVE : COLORS.BUTTON_BG,
-            color: COLORS.PANEL_TEXT,
-            border: `1px solid ${COLORS.PANEL_BORDER}`,
-            borderRadius: 3,
-            padding: '2px 8px',
-            fontFamily: 'monospace',
-            fontSize: 11,
-            cursor: 'pointer',
-          }}
-        >
-          {devMode ? 'ON' : 'OFF'}
-        </button>
-        <span style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 10 }}>Ctrl+Shift+D — show API dots</span>
-      </Row>
-
-      {isMlEnabled() && section('RL TRAINING')}
-      {isMlEnabled() && (
-      <>
-      <Row label="Experiment">
-        <select
-          value={configName}
-          onChange={e => setConfigName(e.target.value)}
-          disabled={trainingRunning}
-          style={{
-            flex: 1,
-            background: COLORS.BUTTON_BG,
-            color: COLORS.PANEL_TEXT,
-            border: `1px solid ${COLORS.PANEL_BORDER}`,
-            borderRadius: 3,
-            fontSize: 11,
-            fontFamily: 'monospace',
-            padding: '2px 4px',
-          }}
-        >
-          {TRAINING_CONFIGS.map(c => (
-            <option key={c} value={c}>{c}</option>
-          ))}
-        </select>
-      </Row>
-      <Row label="Save checkpoints">
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: COLORS.PANEL_TEXT, fontSize: 11, fontFamily: 'monospace' }}>
-          <input
-            type="checkbox"
-            checked={persistCheckpoints}
-            onChange={e => setPersistCheckpoints(e.target.checked)}
-            disabled={trainingRunning}
-          />
-          persist across runs
-        </label>
-      </Row>
-      <Row label="Resume">
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: COLORS.PANEL_TEXT, fontSize: 11, fontFamily: 'monospace' }}>
-          <input
-            type="checkbox"
-            checked={resumeTraining}
-            onChange={e => setResumeTraining(e.target.checked)}
-            disabled={trainingRunning}
-          />
-          continue from last checkpoint
-        </label>
-      </Row>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-        <button
-          onClick={() => void startTraining()}
-          disabled={trainingRunning}
-          style={{
-            background: COLORS.BUTTON_ACTIVE,
-            color: '#fff',
-            border: 'none',
-            borderRadius: 3,
-            padding: '4px 12px',
-            fontSize: 11,
-            fontFamily: 'monospace',
-            cursor: trainingRunning ? 'default' : 'pointer',
-            opacity: trainingRunning ? 0.5 : 1,
-          }}
-        >
-          Start
-        </button>
-        <button
-          onClick={() => void stopTraining()}
-          disabled={!trainingRunning}
-          style={{
-            background: COLORS.BUTTON_BG,
-            color: COLORS.PANEL_TEXT,
-            border: `1px solid ${COLORS.PANEL_BORDER}`,
-            borderRadius: 3,
-            padding: '4px 12px',
-            fontSize: 11,
-            fontFamily: 'monospace',
-            cursor: !trainingRunning ? 'default' : 'pointer',
-            opacity: !trainingRunning ? 0.5 : 1,
-          }}
-        >
-          Stop
-        </button>
-      </div>
-      <div style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 10, fontFamily: 'monospace', marginBottom: 8 }}>
-        {trainingRunning ? 'running' : (trainingStatus?.status ?? 'idle')}
-        {total > 0 ? ` — ${done.toLocaleString()} / ${total.toLocaleString()} (${pct}%)` : ''}
-        {trainingStatus?.last_checkpoint ? ` — ${trainingStatus.last_checkpoint}` : ''}
-      </div>
-      {trainingError && (
-        <div style={{ color: COLORS.ERROR_BANNER, fontSize: 10, fontFamily: 'monospace', marginBottom: 8 }}>
-          {trainingError}
+    <Sheet open={open} onOpenChange={onOpenChange} modal={false}>
+      <SheetContent
+        side="right"
+        overlay={false}
+        showCloseButton={false}
+        className="w-[380px] gap-0 p-0 sm:max-w-[380px] md:data-[side=right]:top-10 md:data-[side=right]:bottom-7 md:data-[side=right]:h-auto"
+        onInteractOutside={(e) => e.preventDefault()}
+      >
+        <div className="flex h-10 shrink-0 items-center gap-2 border-b pr-1.5 pl-4">
+          <SheetTitle className="text-xs font-medium">Sim config</SheetTitle>
+          <SheetDescription className="flex items-center gap-1 text-[11px]">
+            <KbdGroup><Kbd>Ctrl</Kbd><Kbd>Shift</Kbd><Kbd>C</Kbd></KbdGroup>
+          </SheetDescription>
+          <Button variant="ghost" size="icon-xs" className="ml-auto" aria-label="Close" onClick={() => onOpenChange(false)}><X /></Button>
         </div>
-      )}
-      <div style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 9, fontFamily: 'monospace', marginBottom: 4 }}>
-        Run <code style={{ fontSize: 9 }}>npm run dev</code> (ML on :8001). Checkpoints → runs/&lt;name&gt;/latest/. Copy policy.zip to ml/models/deployed/ for everyone.
-      </div>
-      </>
-      )}
 
-      {section('OPERATIONS')}
-      <Row label="Rolling stock %">
-        <input
-          type="range"
-          min={10}
-          max={100}
-          step={5}
-          value={config.rolling_stock_pct}
-          onChange={e => updateConfig({ rolling_stock_pct: Number(e.target.value) })}
-          style={{ flex: 1 }}
-        />
-        <span style={{ color: COLORS.PANEL_TEXT, fontFamily: 'monospace', fontSize: 11, width: 32 }}>
-          {config.rolling_stock_pct}%
-        </span>
-      </Row>
-      <Row label="Headway target (s)">
-        <NumInput value={config.headway_target} min={30} max={600} step={10} onChange={v => updateConfig({ headway_target: v })} />
-      </Row>
+        <ScrollArea className="min-h-0 flex-1">
+          <Group title="Developer">
+            <Row label="Dev mode" hint={<KbdGroup><Kbd>Ctrl</Kbd><Kbd>Shift</Kbd><Kbd>D</Kbd></KbdGroup>}>
+              <Switch checked={devMode} onCheckedChange={setDevMode} aria-label="Dev mode" />
+            </Row>
+          </Group>
 
-      {section(`ROLLING STOCK — ${activeProfile?.name ?? '—'}`)}
-      {activeProfile && (
-        <>
-          <Row label="Max speed (m/s)">
-            <NumInput value={activeProfile.max_speed} min={5} max={35} step={0.5} onChange={v => patchProfile({ max_speed: v })} />
-            <span style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 10, fontFamily: 'monospace' }}>({(activeProfile.max_speed * 3.6).toFixed(0)} km/h)</span>
-          </Row>
-          <Row label="Accel (m/s²)">
-            <NumInput value={activeProfile.accel} min={0.3} max={3} step={0.1} onChange={v => patchProfile({ accel: v })} />
-          </Row>
-          <Row label="Decel (m/s²)">
-            <NumInput value={activeProfile.decel} min={0.5} max={4} step={0.1} onChange={v => patchProfile({ decel: v })} />
-          </Row>
-          <Row label="Length (m)">
-            <NumInput value={activeProfile.length} min={20} max={200} step={1} onChange={v => patchProfile({ length: v })} />
-          </Row>
-          <Row label="Mass (t)">
-            <NumInput value={activeProfile.mass} min={50} max={500} step={10} onChange={v => patchProfile({ mass: v })} />
-          </Row>
-        </>
-      )}
+          {isMlEnabled() && (
+            <Group title="RL training">
+              <Row label="Experiment">
+                <Pick
+                  value={configName}
+                  onChange={setConfigName}
+                  disabled={trainingRunning}
+                  options={TRAINING_CONFIGS.map((c) => ({ value: c, label: c }))}
+                />
+              </Row>
+              <Row label="Save checkpoints">
+                <Checkbox checked={persistCheckpoints} onCheckedChange={(v) => setPersistCheckpoints(v === true)} disabled={trainingRunning} aria-label="Save checkpoints" />
+                <span className="text-[11px] text-faint">persist across runs</span>
+              </Row>
+              <Row label="Resume">
+                <Checkbox checked={resumeTraining} onCheckedChange={(v) => setResumeTraining(v === true)} disabled={trainingRunning} aria-label="Resume" />
+                <span className="text-[11px] text-faint">from last checkpoint</span>
+              </Row>
+              <div className="flex items-center gap-1.5 pt-1">
+                <Button size="xs" onClick={() => void startTraining()} disabled={trainingRunning}>Start</Button>
+                <Button size="xs" variant="outline" onClick={() => void stopTraining()} disabled={!trainingRunning}>Stop</Button>
+                <span className="num ml-1 truncate text-[11px] text-muted-foreground">
+                  {trainingRunning ? 'running' : (trainingStatus?.status ?? 'idle')}
+                  {total > 0 ? ` · ${done.toLocaleString()} / ${total.toLocaleString()} (${pct}%)` : ''}
+                </span>
+              </div>
+              {trainingStatus?.last_checkpoint && <p className="num truncate text-[11px] text-faint">{trainingStatus.last_checkpoint}</p>}
+              {trainingError && <p className="num text-[11px] text-danger">{trainingError}</p>}
+              <p className="text-[11px] leading-relaxed text-faint">
+                Needs the ML API on :8001 (<span className="num">npm run dev</span>). Checkpoints go to runs/&lt;name&gt;/latest/;
+                copy policy.zip to ml/models/deployed/ to ship it.
+              </p>
+            </Group>
+          )}
 
-      {section('EVENT INJECTION')}
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-        <select
-          value={newEventKind}
-          onChange={e => setNewEventKind(e.target.value as EventKind)}
-          style={{ background: COLORS.BUTTON_BG, color: COLORS.PANEL_TEXT, border: `1px solid ${COLORS.PANEL_BORDER}`, borderRadius: 3, fontSize: 11, fontFamily: 'monospace', padding: '2px 4px' }}
-        >
-          {EVENT_KINDS.map(k => <option key={k} value={k}>{k}</option>)}
-        </select>
-        <select
-          value={newEventTrain}
-          onChange={e => setNewEventTrain(e.target.value)}
-          style={{ background: COLORS.BUTTON_BG, color: COLORS.PANEL_TEXT, border: `1px solid ${COLORS.PANEL_BORDER}`, borderRadius: 3, fontSize: 11, fontFamily: 'monospace', padding: '2px 4px' }}
-        >
-          {(runtime?.trains ?? []).map(t => <option key={t.train_id} value={t.train_id}>{t.label}</option>)}
-        </select>
-        {newEventKind === 'signal_fail' ? (
-          <select
-            value={newEventSignal}
-            onChange={e => setNewEventSignal(e.target.value)}
-            style={{ background: COLORS.BUTTON_BG, color: COLORS.PANEL_TEXT, border: `1px solid ${COLORS.PANEL_BORDER}`, borderRadius: 3, fontSize: 11, fontFamily: 'monospace', padding: '2px 4px', maxWidth: 120 }}
-          >
-            <option value="">signal</option>
-            {(runtime?.signals ?? []).map(s => <option key={s.signal_id} value={s.signal_id}>{s.signal_id}</option>)}
-          </select>
-        ) : null}
-        <NumInput value={newEventDur} min={5} max={300} step={5} onChange={setNewEventDur} />
-        <NumInput value={newEventDelay} min={0} max={120} step={5} onChange={setNewEventDelay} />
-        {newEventKind === 'slow_speed' && (
-          <NumInput value={newEventTsr} min={5} max={80} step={5} onChange={setNewEventTsr} />
-        )}
-        <button
-          onClick={() => void addEvent()}
-          style={{ background: COLORS.BUTTON_ACTIVE, color: '#fff', border: 'none', borderRadius: 3, padding: '2px 10px', fontSize: 11, fontFamily: 'monospace', cursor: 'pointer' }}
-        >
-          Inject
-        </button>
-      </div>
-      {injectError && (
-        <div style={{ color: COLORS.ERROR_BANNER, fontSize: 10, fontFamily: 'monospace', marginBottom: 6 }}>{injectError}</div>
-      )}
-      {activeIncidents.length === 0 && (
-        <div style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 10, fontFamily: 'monospace' }}>No active events</div>
-      )}
-      {activeIncidents.map(evt => (
-        <div key={evt.id} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-          <span style={{ color: COLORS.SIGNAL_YELLOW, fontFamily: 'monospace', fontSize: 10 }}>
-            {evt.active ? '●' : '○'} {evt.target_train_id ?? evt.target_signal_id ?? '—'} {evt.kind}
-            {evt.active ? ` ${evt.remaining_s.toFixed(0)}s` : ` in ${evt.starts_in_s.toFixed(0)}s`}
-          </span>
-          <button
-            onClick={() => void removeEvent(evt.id)}
-            style={{ background: 'none', border: 'none', color: COLORS.ERROR_BANNER, fontSize: 13, cursor: 'pointer', lineHeight: 1 }}
-          >
-            ×
-          </button>
-        </div>
-      ))}
-    </div>
+          <Group title="Operations">
+            <Row label="Rolling stock" hint={`${config.rolling_stock_pct}%`}>
+              <Slider
+                min={10}
+                max={100}
+                step={5}
+                value={[config.rolling_stock_pct]}
+                onValueChange={([v]) => updateConfig({ rolling_stock_pct: v })}
+                aria-label="Rolling stock percentage"
+              />
+            </Row>
+            <Row label="Headway target" hint="s">
+              <NumInput value={config.headway_target} min={30} max={600} step={10} onChange={(v) => updateConfig({ headway_target: v })} />
+            </Row>
+          </Group>
+
+          {activeProfile && (
+            <Group title={`Rolling stock · ${activeProfile.name}`}>
+              <Row label="Max speed" hint={`m/s · ${(activeProfile.max_speed * 3.6).toFixed(0)} km/h`}>
+                <NumInput value={activeProfile.max_speed} min={5} max={35} step={0.5} onChange={(v) => patchProfile({ max_speed: v })} />
+              </Row>
+              <Row label="Acceleration" hint="m/s²">
+                <NumInput value={activeProfile.accel} min={0.3} max={3} step={0.1} onChange={(v) => patchProfile({ accel: v })} />
+              </Row>
+              <Row label="Deceleration" hint="m/s²">
+                <NumInput value={activeProfile.decel} min={0.5} max={4} step={0.1} onChange={(v) => patchProfile({ decel: v })} />
+              </Row>
+              <Row label="Length" hint="m">
+                <NumInput value={activeProfile.length} min={20} max={200} step={1} onChange={(v) => patchProfile({ length: v })} />
+              </Row>
+              <Row label="Mass" hint="t">
+                <NumInput value={activeProfile.mass} min={50} max={500} step={10} onChange={(v) => patchProfile({ mass: v })} />
+              </Row>
+            </Group>
+          )}
+
+          <Group title="Scheduled events">
+            <Row label="Kind">
+              <Pick value={newEventKind} onChange={setNewEventKind} options={EVENT_KINDS.map((k) => ({ value: k, label: k }))} />
+            </Row>
+            {newEventKind === 'signal_fail' ? (
+              <Row label="Signal">
+                <Pick
+                  value={newEventSignal}
+                  onChange={setNewEventSignal}
+                  placeholder="Select…"
+                  options={(runtime?.signals ?? []).map((s) => ({ value: s.signal_id, label: s.signal_id }))}
+                />
+              </Row>
+            ) : (
+              <Row label="Train">
+                <Pick
+                  value={newEventTrain}
+                  onChange={setNewEventTrain}
+                  options={(runtime?.trains ?? []).map((t) => ({ value: t.train_id, label: t.label || t.train_id }))}
+                />
+              </Row>
+            )}
+            <Row label="Duration" hint="s"><NumInput value={newEventDur} min={5} max={300} step={5} onChange={setNewEventDur} /></Row>
+            <Row label="Starts in" hint="s"><NumInput value={newEventDelay} min={0} max={120} step={5} onChange={setNewEventDelay} /></Row>
+            {newEventKind === 'slow_speed' && (
+              <Row label="Speed limit" hint="km/h"><NumInput value={newEventTsr} min={5} max={80} step={5} onChange={setNewEventTsr} /></Row>
+            )}
+            <div className="flex justify-end pt-1">
+              <Button size="xs" onClick={() => void addEvent()}>Schedule</Button>
+            </div>
+            {injectError && <p className="num text-[11px] text-danger">{injectError}</p>}
+          </Group>
+
+          <Group title="Active events">
+            {activeIncidents.length === 0 && <p className="text-xs text-muted-foreground">None.</p>}
+            <ul className="flex flex-col">
+              {activeIncidents.map((evt) => (
+                <li key={evt.id} className="flex h-7 items-center gap-2 text-xs">
+                  <Badge variant={evt.active ? 'caution' : 'neutral'}>{evt.active ? 'Active' : 'Queued'}</Badge>
+                  <span className="num min-w-0 flex-1 truncate">
+                    {evt.target_train_id ?? evt.target_signal_id ?? '—'} {evt.kind}
+                  </span>
+                  <span className="num text-[11px] text-faint">
+                    {evt.active ? `${evt.remaining_s.toFixed(0)} s left` : `in ${evt.starts_in_s.toFixed(0)} s`}
+                  </span>
+                  <Button variant="ghost" size="icon-xs" aria-label={`Cancel ${evt.kind}`} onClick={() => void removeEvent(evt.id)}><X /></Button>
+                </li>
+              ))}
+            </ul>
+          </Group>
+        </ScrollArea>
+      </SheetContent>
+    </Sheet>
   )
 }

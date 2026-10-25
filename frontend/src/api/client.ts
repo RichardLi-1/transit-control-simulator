@@ -11,7 +11,7 @@ import type {
   DispatchPolicyInfo,
 } from '../types/domain'
 import { isMlEnabled } from '../config/ml'
-import { MOCK_TOPOLOGY, tickMockRuntime } from '../mock/mockData'
+import { MOCK_TOPOLOGY, mockCommandTrain, tickMockRuntime } from '../mock/mockData'
 import { useConnectionStore } from '../store/connectionStore'
 
 const BASE = import.meta.env.VITE_API_BASE || ''   // proxied by Vite dev server
@@ -67,7 +67,17 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
+/** Dev: `?mock=1` forces the built-in mock service even when a backend is reachable. */
+function mockRequestedByUrl(): boolean {
+  try {
+    return import.meta.env.DEV && new URLSearchParams(window.location.search).get('mock') === '1'
+  } catch {
+    return false
+  }
+}
+
 export async function fetchTopology(): Promise<Topology> {
+  if (!MOCK_MODE && mockRequestedByUrl()) enableMockMode()
   if (MOCK_MODE) return MOCK_TOPOLOGY
   try {
     const result = await withRetry(() => apiFetch<Topology>('/topology'))
@@ -144,7 +154,10 @@ export async function cancelEvent(eventId: string): Promise<void> {
 }
 
 export async function commandTrain(trainId: string, action: DispatchAction, count = 1): Promise<void> {
-  if (MOCK_MODE) return
+  if (MOCK_MODE) {
+    mockCommandTrain(trainId, action, count)
+    return
+  }
   try {
     await apiFetch(`/commands/train/${trainId}`, {
       method: 'POST',
