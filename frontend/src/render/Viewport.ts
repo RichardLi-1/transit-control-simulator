@@ -12,6 +12,22 @@ export interface Camera {
 const MIN_ZOOM = 0.05
 const MAX_ZOOM = 40
 
+export interface Insets { top: number; right: number; bottom: number; left: number }
+
+/**
+ * Screen area covered by floating chrome (panels, legend, zoom stack). `fitToBounds` centres the
+ * bounds in the remaining area so FIT never hides the line under a panel. Set by App.
+ */
+let fitInsets: Insets = { top: 0, right: 0, bottom: 0, left: 0 }
+
+export function setFitInsets(insets: Insets): void {
+  fitInsets = { ...insets }
+}
+
+export function getFitInsets(): Insets {
+  return { ...fitInsets }
+}
+
 export class Viewport {
   camera: Camera = { cx: 0, cy: 0, zoom: 5 }
   width = 800
@@ -51,12 +67,22 @@ export class Viewport {
     const bw = bounds.maxX - bounds.minX
     const bh = bounds.maxY - bounds.minY
     if (bw === 0 || bh === 0) return
-    const zoomX = this.width / bw
-    const zoomY = this.height / bh
-    const zoom = Math.min(zoomX, zoomY) * (1 - paddingFraction)
-    this.camera.cx = bounds.minX + bw / 2
-    this.camera.cy = bounds.minY + bh / 2
+    // Usable area = canvas minus floating chrome; ignore insets that would leave too little room.
+    let { top, right, bottom, left } = fitInsets
+    if (this.width - left - right < this.width * 0.45) { left = 0; right = 0 }
+    if (this.height - top - bottom < this.height * 0.45) { top = 0; bottom = 0 }
+    const uw = this.width - left - right
+    const uh = this.height - top - bottom
+    // Padding is a fraction of the smaller usable side, so wide screens don't lose height.
+    const pad = Math.min(uw, uh) * paddingFraction * 0.5
+    const zoom = Math.min((uw - pad * 2) / bw, (uh - pad * 2) / bh)
     this.camera.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom))
+    const z = this.camera.zoom
+    // Centre of the usable area, expressed relative to the canvas centre.
+    const offX = left + uw / 2 - this.width / 2
+    const offY = top + uh / 2 - this.height / 2
+    this.camera.cx = bounds.minX + bw / 2 - offX / z
+    this.camera.cy = bounds.minY + bh / 2 - offY / z
   }
 
   /** Returns true if a world-space bounding box intersects the visible area. */
