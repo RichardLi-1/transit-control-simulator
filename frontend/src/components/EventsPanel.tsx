@@ -1,183 +1,154 @@
-import { useState, useMemo } from 'react'
+/**
+ * Inspector → Events: the operations log (newest first) and the disruption injector.
+ */
+import { useMemo, useState } from 'react'
 import posthog from 'posthog-js'
+import { Pause, Play } from 'lucide-react'
 import { useEventsStore, type EventSeverity, type SimEvent } from '../store/eventsStore'
 import { useRuntimeStore } from '../store/runtimeStore'
 import { useTopologyStore } from '../store/topologyStore'
 import { injectEvent } from '../api/client'
-import { COLORS } from '../constants/colors'
+import { fmtSimClock } from '@/lib/format'
+import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Toggle } from '@/components/ui/toggle'
 
-const SEV_COLOR: Record<EventSeverity, string> = {
-  info: COLORS.PANEL_TEXT,
-  warn: COLORS.SIGNAL_YELLOW,
-  error: COLORS.SIGNAL_RED,
+/** Visible events + how many are warnings/errors (the tab shows the count). */
+export function useVisibleEvents() {
+  const events = useEventsStore((s) => s.events)
+  const showSignals = useEventsStore((s) => s.showSignals)
+  return useMemo(() => {
+    const visible = showSignals ? events : events.filter((e) => e.kind !== 'SIG')
+    return { visible, alerts: visible.filter((e) => e.severity !== 'info').length }
+  }, [events, showSignals])
 }
-
-const SERVICE_START_SEC = 6 * 3600
-
-function fmtSimT(t: number | null) {
-  if (t == null || !Number.isFinite(t)) return '--:--:--'
-  const total = Math.max(0, Math.floor(SERVICE_START_SEC + t))
-  const hh = Math.floor(total / 3600) % 24
-  const mm = Math.floor((total % 3600) / 60)
-  const ss = total % 60
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(hh)}:${pad(mm)}:${pad(ss)}`
-}
-
-const PANEL_WIDTH = 340
-const HEADER_H = 38
 
 export function EventsPanel() {
-  const { events, paused, panelOpen, injectOpen, showSignals, togglePaused, toggleShowSignals, clear, setPanelOpen, setInjectOpen } = useEventsStore()
-  const runtime = useRuntimeStore((s) => s.runtime)
-  const dispatch = runtime?.ops?.dispatch
-  const visible = useMemo(
-    () => (showSignals ? events : events.filter((e) => e.kind !== 'SIG')),
-    [events, showSignals],
-  )
-
-  if (!panelOpen) {
-    return (
-      <div
-        data-help="events"
-        onClick={() => setPanelOpen(true)}
-        style={{
-          position: 'absolute', top: HEADER_H + 8, right: 8, zIndex: 60,
-          background: COLORS.PANEL_BG, border: `1px solid ${COLORS.PANEL_BORDER}`,
-          color: COLORS.PANEL_TEXT, fontFamily: 'monospace', fontSize: 11,
-          padding: '4px 8px', cursor: 'pointer', borderRadius: 3, letterSpacing: '0.08em',
-        }}
-        title="Open events panel"
-      >
-        EVENTS ◀ {visible.length > 0 && <span style={{ color: COLORS.PANEL_TEXT_DIM }}>({visible.length})</span>}
-      </div>
-    )
-  }
+  const { events, paused, injectOpen, showSignals, togglePaused, toggleShowSignals, clear, setInjectOpen } = useEventsStore()
+  const { visible } = useVisibleEvents()
 
   return (
-    <div
-      data-help="events"
-      style={{
-        position: 'absolute', top: HEADER_H, right: 0, bottom: 0, width: PANEL_WIDTH, maxWidth: '100vw', zIndex: 60,
-        background: COLORS.PANEL_BG, borderLeft: `1px solid ${COLORS.PANEL_BORDER}`,
-        display: 'flex', flexDirection: 'column',
-        fontFamily: 'monospace', fontSize: 11, color: COLORS.PANEL_TEXT,
-      }}
-    >
-      {/* Header */}
-      <div style={{
-        padding: '8px 10px', borderBottom: `1px solid ${COLORS.PANEL_BORDER}`,
-        display: 'flex', alignItems: 'center', gap: 6,
-      }}>
-        <span style={{ letterSpacing: '0.1em', flex: 1 }}>EVENTS</span>
-        <span style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 10 }}>{visible.length}</span>
-        <MiniBtn label={showSignals ? 'SIGNALS ●' : 'SIGNALS ○'} onClick={toggleShowSignals} active={showSignals} title="Show routine signal changes" />
-        <MiniBtn label={paused ? 'RESUME' : 'PAUSE'} onClick={togglePaused} active={paused} />
-        <MiniBtn label="CLEAR" onClick={clear} />
-        <MiniBtn label="✕" onClick={() => setPanelOpen(false)} title="Hide panel" />
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex h-9 shrink-0 items-center gap-1 border-b px-2">
+        <Toggle size="sm" pressed={showSignals} onPressedChange={toggleShowSignals} title="Include routine signal changes">
+          Signals
+        </Toggle>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          aria-pressed={paused}
+          onClick={togglePaused}
+          aria-label={paused ? 'Resume log' : 'Pause log'}
+          title={paused ? 'Resume log' : 'Pause log'}
+        >
+          {paused ? <Play /> : <Pause />}
+        </Button>
+        <Button variant="ghost" size="xs" onClick={clear} disabled={events.length === 0}>Clear</Button>
+        <div className="flex-1" />
+        <span data-help="inject" className="inline-flex">
+          <Button variant="outline" size="xs" aria-expanded={injectOpen} onClick={() => setInjectOpen(!injectOpen)}>
+            Inject
+          </Button>
+        </span>
       </div>
 
-      {dispatch && (
-        <div style={{ padding: '6px 10px', borderBottom: `1px solid ${COLORS.PANEL_BORDER}`, color: COLORS.PANEL_TEXT_DIM, fontSize: 10 }}>
-          DISP count={dispatch.count}
-          {dispatch.next_due_in_s != null ? ` · next ~${Math.ceil(dispatch.next_due_in_s)}s` : ''}
-          {dispatch.blocked ? ' · BLOCKED' : ''}
-        </div>
-      )}
+      {injectOpen && <InjectForm onDone={() => setInjectOpen(false)} />}
 
-      {/* Inject toggle */}
-      <div
-        data-help="inject"
-        onClick={() => setInjectOpen(!injectOpen)}
-        style={{
-          padding: '6px 10px', borderBottom: `1px solid ${COLORS.PANEL_BORDER}`,
-          cursor: 'pointer', color: COLORS.PANEL_TEXT_DIM, fontSize: 10, letterSpacing: '0.1em',
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        }}
-      >
-        <span>{injectOpen ? '▾' : '▸'} INJECT EVENT</span>
-        <span style={{ color: COLORS.PANEL_TEXT_DIM }}>{injectOpen ? '' : 'expand'}</span>
-      </div>
-
-      {injectOpen && <InjectPane />}
-
-      {/* Event list */}
-      <div style={{ flex: 1, overflowY: 'auto' }}>
+      <ScrollArea className="min-h-0 flex-1">
+        <ol role="log" aria-live="polite" aria-label="Events">
+          {visible.map((e) => <EventRow key={e.id} e={e} />)}
+        </ol>
         {visible.length === 0 && (
-          <div style={{ padding: 14, color: COLORS.PANEL_TEXT_DIM, fontSize: 11 }}>
+          <p className="px-3 py-4 text-xs text-muted-foreground">
             {events.length === 0
-              ? 'no events yet — system idle.'
-              : 'only routine signal changes so far — turn on SIGNALS to see them.'}
-          </div>
+              ? 'No events yet. Commands, holds and faults appear here.'
+              : 'Only routine signal changes so far. Turn on Signals to see them.'}
+          </p>
         )}
-        {visible.map((e) => <EventRow key={e.id} e={e} />)}
-      </div>
+      </ScrollArea>
+      {paused && (
+        <p className="shrink-0 border-t px-3 py-1.5 text-[11px] text-caution">Log paused. New events are not recorded.</p>
+      )}
     </div>
   )
 }
 
-const KIND_LABEL_DISPLAY: Record<string, string> = {
-  SIG:   'SIGNAL',
-  SW:    'SWITCH',
+const KIND_LABEL: Record<string, string> = {
+  SIG: 'SIGNAL',
+  SW: 'SWITCH',
   TRAIN: 'TRAIN',
-  ATP:   'SAFETY',
-  EB:    'E-BRAKE',
-  CMD:   'COMMAND',
-  LINK:  'LINK',
-  INIT:  'SYSTEM',
-  DISP:  'DISPATCH',
-  PLAN:  'PLANNED',
-  TSR:   'SPEED',
-  HOLD:  'HOLD',
-  NOTE:  'NOTE',
+  ATP: 'SAFETY',
+  EB: 'E-BRAKE',
+  CMD: 'CMD',
+  LINK: 'LINK',
+  INIT: 'SYSTEM',
+  DISP: 'DISPATCH',
+  PLAN: 'PLANNED',
+  TSR: 'SPEED',
+  HOLD: 'HOLD',
+  NOTE: 'NOTE',
 }
 
-function kindLabel(kind: string): string {
-  return KIND_LABEL_DISPLAY[kind] ?? kind
+const SEV_TEXT: Record<EventSeverity, string> = {
+  info: 'text-faint',
+  warn: 'text-caution',
+  error: 'text-danger',
 }
 
 function EventRow({ e }: { e: SimEvent }) {
   const planned = e.kind === 'PLAN'
   return (
-    <div style={{
-      padding: '5px 10px', borderBottom: `1px solid #0d1620`,
-      display: 'grid', gridTemplateColumns: '64px 64px 1fr', gap: 8, alignItems: 'baseline',
-      fontSize: 11, lineHeight: 1.4,
-      opacity: planned ? 0.85 : 1,
-      fontStyle: planned ? 'italic' : 'normal',
-    }}>
-      <span style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 10 }}>{fmtSimT(e.simT)}</span>
-      <span style={{ color: planned ? COLORS.PANEL_TEXT_DIM : SEV_COLOR[e.severity], fontSize: 10 }}>
-        {planned ? 'PLANNED' : kindLabel(e.kind)}
+    <li className="grid grid-cols-[52px_58px_1fr] items-baseline gap-x-2 border-b border-border/60 px-3 py-1 text-xs">
+      <span className="num text-[11px] text-faint">{fmtSimClock(e.simT)}</span>
+      <span className={cn('num truncate text-[10px] tracking-wide', SEV_TEXT[e.severity])}>{KIND_LABEL[e.kind] ?? e.kind}</span>
+      <span className={cn('min-w-0 leading-snug', e.severity === 'info' ? 'text-muted-foreground' : 'text-foreground', planned && 'text-faint')}>
+        {e.message}
       </span>
-      <span style={{ color: planned ? COLORS.PANEL_TEXT_DIM : SEV_COLOR[e.severity] }}>{e.message}</span>
+    </li>
+  )
+}
+
+// ── Inject form ────────────────────────────────────────────────────────────
+
+type InjectKind = 'eb_apply' | 'eb_release' | 'switch_fail' | 'speed_restrict' | 'station_hold' | 'note'
+
+const INJECT_LABEL: Record<InjectKind, string> = {
+  speed_restrict: 'Temporary speed restriction',
+  station_hold: 'Hold at station',
+  eb_apply: 'Emergency brake, apply',
+  eb_release: 'Emergency brake, release',
+  switch_fail: 'Switch failure',
+  note: 'Operator note',
+}
+
+const INJECT_SOURCE: Record<InjectKind, 'driver' | 'manual' | 'wayside'> = {
+  eb_apply: 'driver',
+  eb_release: 'driver',
+  switch_fail: 'wayside',
+  speed_restrict: 'wayside',
+  station_hold: 'wayside',
+  note: 'manual',
+}
+
+const TARGET_LABEL: Record<InjectKind, string | null> = {
+  eb_apply: 'Train', eb_release: 'Train', station_hold: 'Train',
+  switch_fail: 'Switch', speed_restrict: 'Train', note: null,
+}
+
+function FormRow({ label, htmlFor, children }: { label: string; htmlFor: string; children: React.ReactNode }) {
+  return (
+    <div className="grid grid-cols-[56px_1fr] items-center gap-2">
+      <Label htmlFor={htmlFor} className="text-xs font-normal text-muted-foreground">{label}</Label>
+      {children}
     </div>
   )
 }
 
-// ── Inject pane ────────────────────────────────────────────────────────────
-
-type InjectKind = 'eb_apply' | 'eb_release' | 'switch_fail' | 'speed_restrict' | 'station_hold' | 'note'
-
-const KIND_LABEL: Record<InjectKind, string> = {
-  eb_apply:       'Emergency brake — apply',
-  eb_release:     'Emergency brake — release',
-  switch_fail:    'Switch failure',
-  speed_restrict: 'Temporary speed restriction',
-  station_hold:   'Hold at station',
-  note:           'Operator note',
-}
-
-const KIND_DEFAULTS: Record<InjectKind, { kind: string; severity: EventSeverity; source: 'driver' | 'manual' | 'wayside' }> = {
-  eb_apply:       { kind: 'EB',     severity: 'error', source: 'driver'  },
-  eb_release:     { kind: 'EB',     severity: 'info',  source: 'driver'  },
-  switch_fail:    { kind: 'SW',     severity: 'error', source: 'wayside' },
-  speed_restrict: { kind: 'TSR',    severity: 'warn',  source: 'wayside' },
-  station_hold:   { kind: 'HOLD',   severity: 'warn',  source: 'wayside' },
-  note:           { kind: 'NOTE',   severity: 'info',  source: 'manual'  },
-}
-
-function InjectPane() {
+function InjectForm({ onDone }: { onDone: () => void }) {
   const { runtime, sendSwitchCommand } = useRuntimeStore()
   const topology = useTopologyStore((s) => s.topology)
   const append = useEventsStore((s) => s.append)
@@ -187,39 +158,20 @@ function InjectPane() {
   const [value, setValue] = useState<string>('')
   const [note, setNote] = useState<string>('')
 
-  const targetOptions = useMemo(() => {
-    if (kind === 'eb_apply' || kind === 'eb_release' || kind === 'station_hold') {
-      return runtime?.trains.map((t) => t.train_id) ?? []
-    }
-    if (kind === 'switch_fail') {
-      return topology?.switches.map((s) => s.id) ?? []
-    }
-    if (kind === 'speed_restrict') {
-      return runtime?.trains.map((t) => t.train_id) ?? []
-    }
-    if (kind === 'note') {
-      return []
-    }
-    return []
-  }, [kind, runtime, topology])
-
-  const targetLabel: Record<InjectKind, string> = {
-    eb_apply: 'Train', eb_release: 'Train', station_hold: 'Train',
-    switch_fail: 'Switch', speed_restrict: 'Train', note: '',
-  }
+  const targets = useMemo(() => {
+    if (kind === 'switch_fail') return (topology?.switches ?? []).map((s) => ({ id: s.id, label: s.id }))
+    if (kind === 'note') return []
+    return (runtime?.trains ?? []).map((t) => ({ id: t.train_id, label: t.label || t.train_id }))
+  }, [kind, runtime?.trains, topology?.switches])
 
   const needsValue = kind === 'speed_restrict'
+  const targetLabel = TARGET_LABEL[kind]
+  const ready = (targetLabel == null || target !== '') && (!needsValue || value !== '')
 
   async function submit() {
-    const meta = KIND_DEFAULTS[kind]
-    const parts: string[] = [KIND_LABEL[kind]]
-    if (target) parts.push(target)
-    if (needsValue && value) parts.push(`${value} km/h`)
-    if (note.trim()) parts.push(`— ${note.trim()}`)
-
     try {
       if (kind === 'note') {
-        await injectEvent({ kind: 'operator_note', note: note.trim() || parts.join(' ') })
+        await injectEvent({ kind: 'operator_note', note: note.trim() || INJECT_LABEL.note })
       } else if (kind === 'eb_apply' && target) {
         await injectEvent({ kind: 'emergency_brake', target_train_id: target, duration_s: 30 })
       } else if (kind === 'eb_release' && target) {
@@ -246,17 +198,16 @@ function InjectPane() {
           })
         } else {
           const cur = runtime?.switches.find((s) => s.switch_id === target)?.state
-          const next = cur === 'normal' ? 'reverse' : 'normal'
-          sendSwitchCommand(target, next)
+          sendSwitchCommand(target, cur === 'normal' ? 'reverse' : 'normal')
           await injectEvent({ kind: 'operator_note', note: note.trim() || `switch ${target} failed (no signal mapped)` })
         }
       } else {
-        append({ source: meta.source, severity: 'warn', kind: 'CMD', message: 'select a target' })
+        append({ source: INJECT_SOURCE[kind], severity: 'warn', kind: 'CMD', message: 'Pick a target first.' })
         return
       }
     } catch (err) {
       posthog.captureException(err instanceof Error ? err : new Error(String(err)), { inject_kind: kind, target })
-      append({ source: 'system', severity: 'error', kind: 'CMD', message: 'inject failed — is backend up?' })
+      append({ source: 'system', severity: 'error', kind: 'CMD', message: 'Inject failed. The simulator did not accept it.' })
       return
     }
 
@@ -266,93 +217,63 @@ function InjectPane() {
   }
 
   return (
-    <div style={{
-      padding: '8px 10px', borderBottom: `1px solid ${COLORS.PANEL_BORDER}`,
-      background: '#08121a', display: 'flex', flexDirection: 'column', gap: 6,
-    }}>
-      <Row label="Type">
-        <select
-          value={kind}
-          onChange={(e) => { setKind(e.target.value as InjectKind); setTarget(''); setValue('') }}
-          style={selectStyle}
-        >
-          {Object.entries(KIND_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-        </select>
-      </Row>
+    <form
+      className="flex shrink-0 flex-col gap-2 border-b bg-muted/40 px-3 py-2.5"
+      onSubmit={(e) => { e.preventDefault(); void submit() }}
+    >
+      <FormRow label="Type" htmlFor="inject-kind">
+        <Select value={kind} onValueChange={(v) => { setKind(v as InjectKind); setTarget(''); setValue('') }}>
+          <SelectTrigger id="inject-kind" size="sm" className="w-full text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent position="popper">
+            {(Object.keys(INJECT_LABEL) as InjectKind[]).map((k) => (
+              <SelectItem key={k} value={k} className="text-xs">{INJECT_LABEL[k]}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </FormRow>
 
-      {targetLabel[kind] && (
-        <Row label={targetLabel[kind]}>
-          <select value={target} onChange={(e) => setTarget(e.target.value)} style={selectStyle}>
-            <option value="">— select —</option>
-            {targetOptions.map((id) => {
-              const name = runtime?.trains.find((t) => t.train_id === id)?.label ?? id
-              return <option key={id} value={id}>{name}</option>
-            })}
-          </select>
-        </Row>
+      {targetLabel && (
+        <FormRow label={targetLabel} htmlFor="inject-target">
+          <Select value={target || undefined} onValueChange={setTarget}>
+            <SelectTrigger id="inject-target" size="sm" className="w-full text-xs">
+              <SelectValue placeholder="Select…" />
+            </SelectTrigger>
+            <SelectContent position="popper" className="max-h-64">
+              {targets.map((t) => <SelectItem key={t.id} value={t.id} className="text-xs">{t.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </FormRow>
       )}
 
       {needsValue && (
-        <Row label="Limit">
-          <input
-            type="number" min={0} max={120} placeholder="km/h"
-            value={value} onChange={(e) => setValue(e.target.value)}
-            style={inputStyle}
-          />
-        </Row>
+        <FormRow label="Limit" htmlFor="inject-limit">
+          <div className="flex items-center gap-2">
+            <Input
+              id="inject-limit"
+              className="num h-7 w-20"
+              type="number" min={0} max={120} inputMode="numeric"
+              value={value} onChange={(e) => setValue(e.target.value)}
+            />
+            <span className="text-xs text-muted-foreground">km/h for 2 min</span>
+          </div>
+        </FormRow>
       )}
 
-      <Row label="Note">
-        <input
-          type="text" placeholder="optional"
+      <FormRow label="Note" htmlFor="inject-note">
+        <Input
+          id="inject-note"
+          className="h-7"
+          type="text" placeholder="Optional"
           value={note} onChange={(e) => setNote(e.target.value)}
-          style={inputStyle}
         />
-      </Row>
+      </FormRow>
 
-      <button onClick={submit} style={{
-        marginTop: 4, background: COLORS.BUTTON_ACTIVE, color: '#fff',
-        border: 'none', borderRadius: 3, padding: '5px 10px',
-        fontFamily: 'monospace', fontSize: 11, letterSpacing: '0.08em', cursor: 'pointer',
-      }}>
-        INJECT ▸
-      </button>
-    </div>
-  )
-}
-
-const selectStyle: React.CSSProperties = {
-  flex: 1, background: COLORS.BUTTON_BG, color: COLORS.PANEL_TEXT,
-  border: `1px solid ${COLORS.PANEL_BORDER}`, borderRadius: 2,
-  padding: '3px 5px', fontFamily: 'monospace', fontSize: 11,
-}
-
-const inputStyle: React.CSSProperties = {
-  ...selectStyle,
-  padding: '3px 6px',
-}
-
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <span style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 10, width: 50, letterSpacing: '0.06em' }}>{label}</span>
-      {children}
-    </div>
-  )
-}
-
-function MiniBtn({ label, onClick, active, title }: { label: string; onClick: () => void; active?: boolean; title?: string }) {
-  return (
-    <button
-      onClick={onClick} title={title}
-      style={{
-        background: active ? COLORS.BUTTON_ACTIVE : COLORS.BUTTON_BG,
-        color: COLORS.PANEL_TEXT, border: `1px solid ${COLORS.PANEL_BORDER}`,
-        borderRadius: 2, padding: '2px 6px', fontFamily: 'monospace', fontSize: 10,
-        letterSpacing: '0.06em', cursor: 'pointer',
-      }}
-    >
-      {label}
-    </button>
+      <div className="flex justify-end gap-1.5 pt-0.5">
+        <Button type="button" variant="ghost" size="xs" onClick={onDone}>Cancel</Button>
+        <Button type="submit" size="xs" disabled={!ready}>Inject</Button>
+      </div>
+    </form>
   )
 }

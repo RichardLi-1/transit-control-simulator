@@ -1,7 +1,10 @@
+/**
+ * Inspector → Dispatch: service level, yard departures, the live dispatch policy (rule-based or
+ * PPO) and, when the ML service is reachable, an offline A/B comparison of the two.
+ */
 import { useCallback, useEffect, useState } from 'react'
 import posthog from 'posthog-js'
 import {
-  fetchDispatchComparison,
   fetchDispatchPolicy,
   fetchLiveDispatchPolicy,
   runDispatchCompare,
@@ -9,35 +12,49 @@ import {
   type LiveDispatchMode,
 } from '../api/client'
 import { useRuntimeStore } from '../store/runtimeStore'
+import { useConnectionStore } from '../store/connectionStore'
 import type { DispatchComparison } from '../types/domain'
-import { COLORS } from '../constants/colors'
+import { isMlEnabled } from '../config/ml'
+import { fmtDuration } from '@/lib/format'
+import { cn } from '@/lib/utils'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Field, Fields, Section, Sub } from './Readouts'
+import { StatusDot } from './StatusDot'
 
-function fmt(n: number, digits = 1) {
-  return Number.isFinite(n) ? n.toFixed(digits) : '—'
+function fmt(n: number | undefined, digits = 1) {
+  return n != null && Number.isFinite(n) ? n.toFixed(digits) : '—'
 }
 
 function pct(n: number | null | undefined) {
   if (n == null || !Number.isFinite(n)) return '—'
-  const sign = n >= 0 ? '+' : ''
-  return `${sign}${n.toFixed(1)}%`
+  return `${n >= 0 ? '+' : '−'}${Math.abs(n).toFixed(1)}%`
 }
 
-// Start collapsed on phone-sized screens: the panel is bottom-anchored and
-// grows upward as async data arrives, so leaving it open on mobile both covers
-// the canvas and registers as cumulative layout shift. Resolved once at module
-// load to keep the first paint stable.
-const START_COLLAPSED_MOBILE =
-  typeof window !== 'undefined' && window.matchMedia('(max-width: 719px)').matches
+/** delta_pct is (rule − ppo) / rule, i.e. positive = PPO lower = better on every metric here. */
+function deltaTone(n: number | null | undefined) {
+  if (n == null || !Number.isFinite(n) || Math.abs(n) < 0.05) return 'text-muted-foreground'
+  return n > 0 ? 'text-ok' : 'text-danger'
+}
 
 export function DispatchPanel() {
-  const [open, setOpen] = useState(!START_COLLAPSED_MOBILE)
+  const mlOn = isMlEnabled()
+  const mlHealth = useConnectionStore((s) => s.endpoints.ml.health)
+  const mockMode = useConnectionStore((s) => s.mockMode)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [policyReady, setPolicyReady] = useState<boolean | null>(null)
   const [data, setData] = useState<DispatchComparison | null>(null)
   const [livePolicy, setLivePolicy] = useState<LiveDispatchMode>('rule')
   const [policySwitchError, setPolicySwitchError] = useState<string | null>(null)
-  const dispatchStatus = useRuntimeStore((s) => s.runtime?.ops?.dispatch)
+  const dispatch = useRuntimeStore((s) => s.runtime?.ops?.dispatch)
+  const service = useRuntimeStore((s) => s.runtime?.ops?.service)
+  const trainCount = useRuntimeStore((s) => s.runtime?.trains.length ?? null)
+
+  const mlOffline = !mlOn || mockMode || mlHealth === 'error' || policyReady === false
 
   const applyLivePolicy = useCallback(async (mode: LiveDispatchMode) => {
     setPolicySwitchError(null)
@@ -45,17 +62,8 @@ export function DispatchPanel() {
       await setLiveDispatchPolicy(mode)
       setLivePolicy(mode)
       posthog.capture('dispatch_policy_switched', { policy: mode, live: true })
-    } catch (err) {
-      setPolicySwitchError(String(err))
-    }
-  }, [])
-
-  const refreshPolicy = useCallback(async () => {
-    try {
-      const info = await fetchDispatchPolicy()
-      setPolicyReady(info.exists)
     } catch {
-      setPolicyReady(false)
+      setPolicySwitchError(mode === 'ppo' ? 'PPO is not available right now.' : 'Could not switch policy.')
     }
   }, [])
 
@@ -68,248 +76,142 @@ export function DispatchPanel() {
       posthog.capture('dispatch_comparison_run', { episodes: result.episodes, seed: result.seed })
     } catch (err) {
       posthog.captureException(err instanceof Error ? err : new Error(String(err)))
-      setError(String(err))
+      setError('Comparison failed. The ML service did not answer.')
     } finally {
       setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    void refreshPolicy()
+    if (mlOn) {
+      void fetchDispatchPolicy().then((info) => setPolicyReady(info.exists)).catch(() => setPolicyReady(false))
+    } else {
+      setPolicyReady(false)
+    }
     void fetchLiveDispatchPolicy()
       .then((s) => setLivePolicy(s.policy_mode === 'ppo' ? 'ppo' : 'rule'))
       .catch(() => { /* backend may be down */ })
-    void fetchDispatchComparison()
-      .then(setData)
-      .catch(() => {
-        /* no cached comparison yet */
-      })
-  }, [refreshPolicy])
+  }, [mlOn])
 
   useEffect(() => {
-    const mode = dispatchStatus?.policy_mode
+    const mode = dispatch?.policy_mode
     if (mode === 'rule' || mode === 'ppo') setLivePolicy(mode)
-  }, [dispatchStatus?.policy_mode])
-
-  useEffect(() => {
-    const onPoint = (e: Event) => {
-      if ((e as CustomEvent<string>).detail === 'dispatch') setOpen(true)
-    }
-    window.addEventListener('cbtc-help-point', onPoint)
-    return () => window.removeEventListener('cbtc-help-point', onPoint)
-  }, [])
-
-  if (!open) {
-    return (
-      <button
-        type="button"
-        data-help="dispatch"
-        onClick={() => setOpen(true)}
-        style={{
-          position: 'absolute',
-          bottom: 12,
-          left: 12,
-          zIndex: 60,
-          background: COLORS.PANEL_BG,
-          border: `1px solid ${COLORS.PANEL_BORDER}`,
-          color: COLORS.PANEL_TEXT,
-          fontFamily: 'monospace',
-          fontSize: 10,
-          padding: '4px 8px',
-          borderRadius: 3,
-          cursor: 'pointer',
-        }}
-      >
-        DISPATCH A/B
-      </button>
-    )
-  }
+  }, [dispatch?.policy_mode])
 
   const rule = data?.rule_based
   const ppo = data?.ppo
   const delta = data?.delta_pct
+  const next = dispatch?.next_due_in_s
+  const target = service?.target_headway_s ?? dispatch?.target_headway_sec ?? null
+  const actual = service?.mean_headway_s ?? null
 
   return (
-    <div
-      data-help="dispatch"
-      style={{
-        position: 'absolute',
-        bottom: 12,
-        left: 12,
-        width: 420,
-        maxWidth: 'calc(100vw - 24px)',
-        background: COLORS.PANEL_BG,
-        border: `1px solid ${COLORS.PANEL_BORDER}`,
-        borderRadius: 5,
-        padding: '10px 12px',
-        zIndex: 60,
-        fontFamily: 'monospace',
-        fontSize: 10,
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
-        <span style={{ color: COLORS.PANEL_TEXT, letterSpacing: '0.06em', flex: 1 }}>
-          DISPATCH CONTROL
-        </span>
-        <button
-          type="button"
-          onClick={() => setOpen(false)}
-          style={{ background: 'none', border: 'none', color: COLORS.PANEL_TEXT_DIM, cursor: 'pointer' }}
+    <ScrollArea className="h-full">
+      <Section title="Service" aside={service?.period ? <span className="text-[11px] text-muted-foreground">{service.period}</span> : undefined}>
+        <Fields>
+          <Field k="Trains in service">{service?.trains_in_service ?? trainCount ?? '—'}</Field>
+          <Field k="Headway" title="Measured from recent departures">
+            {fmtDuration(actual ?? target)}
+            {actual != null && target != null && <Sub> / {fmtDuration(target)} target</Sub>}
+            {actual == null && target != null && <Sub> target</Sub>}
+          </Field>
+        </Fields>
+      </Section>
+
+      <Section title="Yard departures">
+        <Fields>
+          <Field k="Dispatched">{dispatch?.count ?? '—'}</Field>
+          <Field k="Next departure" mono={!dispatch?.blocked} className={dispatch?.blocked ? 'text-caution' : undefined}>
+            {dispatch?.blocked ? 'Held, yard or fleet limit' : next != null ? fmtDuration(next) : '—'}
+          </Field>
+          <Field k="Fleet limit">{dispatch?.max_trains ?? '—'}</Field>
+        </Fields>
+      </Section>
+
+      <Section
+        title="Policy"
+        aside={dispatch?.shield_intervened ? <Badge variant="caution" title="The safety shield overrode the last policy action">Shield</Badge> : undefined}
+      >
+        <ToggleGroup
+          type="single"
+          variant="outline"
+          spacing={0}
+          value={livePolicy}
+          onValueChange={(m) => { if (m === 'rule' || m === 'ppo') void applyLivePolicy(m) }}
+          aria-label="Live dispatch policy"
+          className="grid w-full grid-cols-2"
         >
-          −
-        </button>
-      </div>
-
-      {/* Live dispatch status — from /state ops.dispatch */}
-      <div style={{
-        marginBottom: 10, padding: '6px 8px',
-        background: '#08121a', border: `1px solid ${COLORS.PANEL_BORDER}`, borderRadius: 3,
-      }}>
-        <div style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 9, letterSpacing: '0.12em', marginBottom: 4 }}>
-          LIVE
-        </div>
-        <div style={{ display: 'flex', gap: 14, color: COLORS.PANEL_TEXT, fontSize: 11 }}>
-          <span>Dispatched: <b>{dispatchStatus?.count ?? 0}</b></span>
-          <span>
-            Next:{' '}
-            {dispatchStatus?.blocked
-              ? <span style={{ color: COLORS.SIGNAL_YELLOW }}>blocked</span>
-              : <span>~{Math.max(0, Math.ceil(dispatchStatus?.next_due_in_s ?? 0))}s</span>}
-          </span>
-          <span>Max: <b>{dispatchStatus?.max_trains ?? '—'}</b></span>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, color: COLORS.PANEL_TEXT_DIM, fontSize: 10, flexWrap: 'wrap' }}>
-          <span style={{ letterSpacing: '0.1em' }}>LIVE POLICY</span>
-          <PolicyChip
-            label="Rule-based"
-            active={livePolicy === 'rule'}
-            onClick={() => void applyLivePolicy('rule')}
-          />
-          <PolicyChip
-            label={`PPO ${policyReady === false ? '(offline)' : ''}`}
-            active={livePolicy === 'ppo'}
-            disabled={policyReady === false}
-            onClick={() => void applyLivePolicy('ppo')}
-          />
-          {dispatchStatus?.effective_headway_sec != null && (
-            <span style={{ fontSize: 9 }}>
-              headway {Math.round(dispatchStatus.effective_headway_sec)}s
-              {dispatchStatus.shield_intervened ? ' · shield' : ''}
-            </span>
+          <ToggleGroupItem value="rule">Rule-based</ToggleGroupItem>
+          <ToggleGroupItem value="ppo" disabled={mlOffline} title={mlOffline ? 'ML service offline' : 'Reinforcement-learning policy'}>
+            PPO
+          </ToggleGroupItem>
+        </ToggleGroup>
+        <Fields className="mt-1.5">
+          {dispatch?.effective_headway_sec != null && (
+            <Field k="Effective headway">{fmtDuration(dispatch.effective_headway_sec)}</Field>
           )}
-        </div>
-        {policySwitchError && (
-          <div style={{ color: COLORS.ERROR_BANNER, fontSize: 9, marginTop: 4 }}>{policySwitchError}</div>
+          {dispatch?.effective_dwell_sec != null && (
+            <Field k="Effective dwell">{Math.round(dispatch.effective_dwell_sec)} s</Field>
+          )}
+        </Fields>
+        <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground" role="status">
+          <StatusDot tone={mlOffline ? 'off' : 'ok'} />
+          {mlOffline ? 'ML offline, rule-based dispatch' : livePolicy === 'ppo' ? 'ML online, PPO dispatching' : 'ML online'}
+        </p>
+        {policySwitchError && <p className="mt-1 text-[11px] text-caution">{policySwitchError}</p>}
+        {!mlOffline && dispatch?.ml_error && livePolicy === 'ppo' && (
+          <p className="mt-1 text-[11px] text-caution">PPO fell back to rule-based for the last departure.</p>
         )}
-        {dispatchStatus?.ml_error && livePolicy === 'ppo' && (
-          <div style={{ color: COLORS.SIGNAL_YELLOW, fontSize: 9, marginTop: 4 }}>
-            ML fallback: {dispatchStatus.ml_error}
+      </Section>
+
+      {!mlOffline && (
+        <Section title="Offline A/B" className="border-b-0">
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" disabled={loading} onClick={() => void runCompare()}>
+              {loading ? 'Running…' : data ? 'Run again' : 'Run comparison'}
+            </Button>
+            <span className="text-[11px] text-muted-foreground">
+              {data ? <>{data.episodes} episodes, seed <span className="num">{data.seed}</span></> : 'Rule vs PPO, same seed'}
+            </span>
           </div>
-        )}
-      </div>
-
-      <div style={{ color: COLORS.PANEL_TEXT_DIM, marginBottom: 8, lineHeight: 1.4, fontSize: 10 }}>
-        Offline rule vs PPO, same seed.
-        {policyReady === false && (
-          <span style={{ color: COLORS.ERROR_BANNER, display: 'block', marginTop: 4 }}>
-            ML API or policy missing — run npm run setup && npm run dev
-          </span>
-        )}
-      </div>
-
-      <div style={{ display: 'flex', gap: 8, marginBottom: data ? 10 : 0 }}>
-        <button
-          type="button"
-          disabled={loading}
-          onClick={() => void runCompare()}
-          style={{
-            background: COLORS.BUTTON_ACTIVE,
-            color: '#fff',
-            border: 'none',
-            borderRadius: 3,
-            padding: '4px 10px',
-            cursor: loading ? 'default' : 'pointer',
-            opacity: loading ? 0.6 : 1,
-          }}
-        >
-          {loading ? 'Running…' : 'Run comparison'}
-        </button>
-        {data && (
-          <span style={{ color: COLORS.PANEL_TEXT_DIM, alignSelf: 'center' }}>
-            {data.episodes} ep · seed {data.seed}
-          </span>
-        )}
-      </div>
-
-      {error && <div style={{ color: COLORS.ERROR_BANNER, marginTop: 8 }}>{error}</div>}
-
-      {data && (
-      <table style={{ width: '100%', borderCollapse: 'collapse', color: COLORS.PANEL_TEXT, fontSize: 10 }}>
-        <thead>
-          <tr style={{ color: COLORS.PANEL_TEXT_DIM, textAlign: 'left' }}>
-            <th style={{ padding: '2px 4px' }}>Metric</th>
-            <th style={{ padding: '2px 4px' }}>Rule</th>
-            <th style={{ padding: '2px 4px' }}>PPO</th>
-            <th style={{ padding: '2px 4px' }}>PPO vs rule</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td style={{ padding: '2px 4px' }}>Mean delay (s)</td>
-            <td>{rule ? fmt(rule.delay_mean_sec) : '—'}</td>
-            <td>{ppo ? fmt(ppo.delay_mean_sec) : '—'}</td>
-            <td style={{ color: (delta?.delay_mean_sec_pct_vs_rule ?? 0) >= 0 ? COLORS.SIGNAL_GREEN : COLORS.SIGNAL_RED }}>
-              {pct(delta?.delay_mean_sec_pct_vs_rule)}
-            </td>
-          </tr>
-          <tr>
-            <td style={{ padding: '2px 4px' }}>P95 delay (s)</td>
-            <td>{rule ? fmt(rule.delay_p95_sec) : '—'}</td>
-            <td>{ppo ? fmt(ppo.delay_p95_sec) : '—'}</td>
-            <td>{pct(delta?.delay_p95_sec_pct_vs_rule)}</td>
-          </tr>
-          <tr>
-            <td style={{ padding: '2px 4px' }}>Headway σ (s)</td>
-            <td>{rule ? fmt(rule.headway_std_mean_sec, 0) : '—'}</td>
-            <td>{ppo ? fmt(ppo.headway_std_mean_sec, 0) : '—'}</td>
-            <td>{pct(delta?.headway_std_mean_sec_pct_vs_rule)}</td>
-          </tr>
-          <tr>
-            <td style={{ padding: '2px 4px' }}>Shield rate</td>
-            <td>{rule ? fmt(rule.unsafe_action_rate * 100, 1) + '%' : '—'}</td>
-            <td>{ppo ? fmt(ppo.unsafe_action_rate * 100, 1) + '%' : '—'}</td>
-            <td>{pct(delta?.unsafe_action_rate_pct_vs_rule)}</td>
-          </tr>
-        </tbody>
-      </table>
+          {error && <p className="mt-2 text-[11px] text-caution">{error}</p>}
+          {data && (
+            <Table className="mt-2 text-xs">
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="micro h-7 px-0">Metric</TableHead>
+                  <TableHead className="micro h-7 text-right">Rule</TableHead>
+                  <TableHead className="micro h-7 text-right">PPO</TableHead>
+                  <TableHead className="micro h-7 pr-0 text-right">Δ</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody className="num text-[11px]">
+                <CompareRow label="Mean delay, s" a={fmt(rule?.delay_mean_sec)} b={fmt(ppo?.delay_mean_sec)} d={delta?.delay_mean_sec_pct_vs_rule} />
+                <CompareRow label="P95 delay, s" a={fmt(rule?.delay_p95_sec)} b={fmt(ppo?.delay_p95_sec)} d={delta?.delay_p95_sec_pct_vs_rule} />
+                <CompareRow label="Headway σ, s" a={fmt(rule?.headway_std_mean_sec, 0)} b={fmt(ppo?.headway_std_mean_sec, 0)} d={delta?.headway_std_mean_sec_pct_vs_rule} />
+                <CompareRow
+                  label="Shield rate"
+                  a={rule ? `${fmt(rule.unsafe_action_rate * 100)}%` : '—'}
+                  b={ppo ? `${fmt(ppo.unsafe_action_rate * 100)}%` : '—'}
+                  d={delta?.unsafe_action_rate_pct_vs_rule}
+                />
+              </TableBody>
+            </Table>
+          )}
+        </Section>
       )}
-    </div>
+    </ScrollArea>
   )
 }
 
-function PolicyChip({
-  label, active, disabled, onClick,
-}: { label: string; active: boolean; disabled?: boolean; onClick: () => void }) {
+function CompareRow({ label, a, b, d }: { label: string; a: string; b: string; d: number | null | undefined }) {
   return (
-    <button
-      type="button"
-      onClick={disabled ? undefined : onClick}
-      disabled={disabled}
-      style={{
-        background: active ? COLORS.BUTTON_ACTIVE : COLORS.BUTTON_BG,
-        color: disabled ? COLORS.PANEL_TEXT_DIM : COLORS.PANEL_TEXT,
-        border: `1px solid ${active ? COLORS.BUTTON_ACTIVE : COLORS.PANEL_BORDER}`,
-        borderRadius: 2,
-        padding: '2px 8px',
-        fontFamily: 'monospace',
-        fontSize: 10,
-        letterSpacing: '0.04em',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.6 : 1,
-      }}
-    >
-      {label}
-    </button>
+    <TableRow className="hover:bg-transparent">
+      <TableCell className="px-0 py-1.5 font-sans text-xs text-muted-foreground">{label}</TableCell>
+      <TableCell className="py-1.5 text-right">{a}</TableCell>
+      <TableCell className="py-1.5 text-right">{b}</TableCell>
+      {/* Shown as PPO's change vs rule-based (a reduction reads as −). */}
+      <TableCell className={cn('py-1.5 pr-0 text-right', deltaTone(d))}>{pct(d == null ? d : -d)}</TableCell>
+    </TableRow>
   )
 }

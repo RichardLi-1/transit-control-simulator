@@ -1,54 +1,49 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
+import { Maximize, Minus, Plus } from 'lucide-react'
 import { useTopologyStore } from '../store/topologyStore'
 import { useRuntimeStore } from '../store/runtimeStore'
 import { Viewport } from '../render/Viewport'
 import { renderTrackLayer } from '../render/layers/TrackLayer'
-import { renderSwitchLayer } from '../render/layers/SwitchLayer'
-import { renderSignalLayer } from '../render/layers/SignalLayer'
-import { renderTrainLayer } from '../render/layers/TrainLayer'
+import { renderSwitchLayer, switchHitAreas } from '../render/layers/SwitchLayer'
+import { renderSignalLayer, signalHitAreas } from '../render/layers/SignalLayer'
+import { pickHitArea } from '../render/hit'
+import { renderTrainLayer, hitTestTrains } from '../render/layers/TrainLayer'
 import { renderLabelLayer } from '../render/layers/LabelLayer'
 import { COLORS } from '../constants/colors'
-import { interpolatePolyline, hitTestPoint } from '../utils/geometry'
-import type { HoveredEntity, Topology, RuntimeState, DispatchAction } from '../types/domain'
-import { Tooltip } from './Tooltip'
-import { useEventsStore } from '../store/eventsStore'
+import { canvasFont } from '../constants/theme'
+import type { HoveredEntity, SwitchState, Topology } from '../types/domain'
+import { MapHoverCard } from './MapHoverCard'
+import { motion } from '../motion/engine'
+import { debugAfterFrame, installMotionDebug } from '../motion/debug'
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Kbd } from '@/components/ui/kbd'
 
 // Shared viewport instance — lives outside React so the rAF loop can close over it
 const vp = new Viewport()
 
-function hitTest(
-  sx: number, sy: number,
-  topology: Topology,
-  runtime: RuntimeState,
-): HoveredEntity | null {
-  // Trains first (largest hit target)
-  for (const train of runtime.trains) {
-    const edge = topology.edges.find(e => e.id === train.edge_id)
-    if (!edge) continue
-    const wp = interpolatePolyline(edge.points, train.offset)
-    if (hitTestPoint(wp.x, wp.y, sx, sy, (wx, wy) => vp.worldToScreen(wx, wy), 22)) {
-      return { kind: 'train', id: train.train_id, screenX: sx, screenY: sy }
-    }
-  }
-  // Signals
-  for (const sig of topology.signals) {
-    const edge = topology.edges.find(e => e.id === sig.edge_id)
-    if (!edge) continue
-    const wp = interpolatePolyline(edge.points, sig.offset)
-    if (hitTestPoint(wp.x, wp.y, sx, sy, (wx, wy) => vp.worldToScreen(wx, wy), 10)) {
-      return { kind: 'signal', id: sig.id, screenX: sx, screenY: sy }
-    }
-  }
-  // Switches
-  for (const sw of topology.switches) {
-    const node = topology.nodes.find(n => n.id === sw.node_id)
-    if (!node) continue
-    if (hitTestPoint(node.x, node.y, sx, sy, (wx, wy) => vp.worldToScreen(wx, wy), 12)) {
-      return { kind: 'switch', id: sw.id, screenX: sx, screenY: sy }
-    }
-  }
+/** Re-run hover hit-testing this often while the pointer rests (trains move under it). */
+const HOVER_REFRESH_MS = 120
+
+/**
+ * Hit-test against what was drawn: trains use the interpolated frame; signals and switches use the
+ * glyph geometry their layers draw with (render/hit capsules), so a click lands on what is visible.
+ */
+function hitTest(sx: number, sy: number, topology: Topology): HoveredEntity | null {
+  const trainId = hitTestTrains(motion.frame, sx, sy)
+  if (trainId) return { kind: 'train', id: trainId, screenX: sx, screenY: sy }
+  const sig = pickHitArea(signalHitAreas(vp, topology), sx, sy)
+  if (sig) return { kind: 'signal', id: sig, screenX: sx, screenY: sy }
+  const sw = pickHitArea(switchHitAreas(vp, topology), sx, sy)
+  if (sw) return { kind: 'switch', id: sw, screenX: sx, screenY: sy }
   return null
 }
+
+const sameHit = (a: HoveredEntity | null, b: HoveredEntity | null) => (a?.kind === b?.kind && a?.id === b?.id)
 
 export function CanvasView() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -59,19 +54,38 @@ export function CanvasView() {
   // Drag state (not in React state — avoids re-renders during pan)
   const dragging = useRef(false)
   const lastMouse = useRef({ x: 0, y: 0 })
+  /** Pointer position over the canvas (canvas coords) or null when outside. */
+  const pointer = useRef<{ x: number; y: number } | null>(null)
 
   // Touch state — single-finger pan + two-finger pinch zoom (mobile)
   const lastTouch = useRef({ x: 0, y: 0 })
   const pinchDist = useRef(0)
   const touchMoved = useRef(false)
 
-  const [hovered, setHovered] = useState<HoveredEntity | null>(null)
-  const [trainMenu, setTrainMenu] = useState<{ id: string; x: number; y: number } | null>(null)
+  const [hovered, setHoveredState] = useState<HoveredEntity | null>(null)
+  const hoveredRef = useRef<HoveredEntity | null>(null)
+  /** Switch throw awaiting confirmation. */
+  const [pendingSwitch, setPendingSwitch] = useState<{ id: string; from: SwitchState; to: SwitchState } | null>(null)
+  /** Until the operator pans or zooms, the map re-fits whenever its area changes size. */
+  const userMoved = useRef(false)
 
-  const { topology } = useTopologyStore()
-  const { setHovered: storeSetHovered, sendSwitchCommand, sendSignalCommand, sendTrainCommand } = useRuntimeStore()
+  const topology = useTopologyStore((s) => s.topology)
+  const storeSetHovered = useRuntimeStore((s) => s.setHovered)
+  const selectedTrainId = useRuntimeStore((s) => s.selectedTrainId)
+  const setSelectedTrain = useRuntimeStore((s) => s.setSelectedTrain)
+  const sendSwitchCommand = useRuntimeStore((s) => s.sendSwitchCommand)
+  const sendSignalCommand = useRuntimeStore((s) => s.sendSignalCommand)
+  const hasRuntime = useRuntimeStore((s) => s.runtime != null)
 
-  // Fit viewport when topology first loads
+  const setHovered = useCallback((hit: HoveredEntity | null) => {
+    hoveredRef.current = hit
+    setHoveredState(hit)
+    storeSetHovered(hit)
+  }, [storeSetHovered])
+
+  useEffect(() => { installMotionDebug() }, [])
+
+  // Fit viewport when topology first loads (or the layout changes)
   useEffect(() => {
     if (!topology) return
     const canvas = canvasRef.current
@@ -88,6 +102,7 @@ export function CanvasView() {
       maxX: topology.bounds.max_x,
       maxY: topology.bounds.max_y,
     })
+    userMoved.current = false
   }, [topology])
 
   // Canvas resize observer — scale by devicePixelRatio to prevent blur on Retina displays
@@ -101,6 +116,11 @@ export function CanvasView() {
       canvas.width = Math.round(w * dpr)
       canvas.height = Math.round(h * dpr)
       vp.resize(w, h)
+      // Panels opening/closing resize the map: keep the whole line in view until the operator takes over.
+      const topo = useTopologyStore.getState().topology
+      if (topo && !userMoved.current && w > 0 && h > 0) {
+        vp.fitToBounds({ minX: topo.bounds.min_x, minY: topo.bounds.min_y, maxX: topo.bounds.max_x, maxY: topo.bounds.max_y })
+      }
     })
     ro.observe(canvas)
     return () => ro.disconnect()
@@ -111,10 +131,13 @@ export function CanvasView() {
     const canvas = canvasRef.current
     if (!canvas) return
     const ctx = canvas.getContext('2d')!
+    let lastHoverCheck = 0
+    let lastErrorLog = 0
 
-    const render = () => {
+    const draw = () => {
+      const now = performance.now()
       const { topology } = useTopologyStore.getState()
-      const { runtime, showSafeZones, showLabels } = useRuntimeStore.getState()
+      const { runtime, showSafeZones, showLabels, selectedTrainId } = useRuntimeStore.getState()
 
       // Flash phase toggles ~2Hz
       flashTimerRef.current += 16
@@ -125,17 +148,20 @@ export function CanvasView() {
 
       const dpr = window.devicePixelRatio || 1
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.globalAlpha = 1
       ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight)
       ctx.fillStyle = COLORS.BACKGROUND
       ctx.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight)
 
       if (!topology) {
-        ctx.fillStyle = COLORS.PANEL_TEXT_DIM
-        ctx.font = '13px monospace'
+        ctx.fillStyle = COLORS.TEXT_2
+        ctx.font = canvasFont(13, 500)
         ctx.fillText('Loading topology…', 20, 40)
-        animRef.current = requestAnimationFrame(render)
         return
       }
+
+      // One interpolation per frame, shared by drawing and hit-testing.
+      const frame = motion.computeFrame(topology, now)
 
       renderTrackLayer(ctx, vp, topology)
       // Station platforms render under signals/switches/trains so the icons sit on top.
@@ -143,15 +169,44 @@ export function CanvasView() {
       if (runtime) {
         renderSwitchLayer(ctx, vp, topology, runtime)
         renderSignalLayer(ctx, vp, topology, runtime, flashRef.current)
-        renderTrainLayer(ctx, vp, topology, runtime, showSafeZones, showLabels)
       }
+      const hov = hoveredRef.current
+      renderTrainLayer(ctx, vp, topology, runtime, frame, {
+        showSafeZones,
+        showLabels,
+        hoveredId: hov?.kind === 'train' ? hov.id : null,
+        selectedId: selectedTrainId,
+      })
+      debugAfterFrame(frame)
 
-      animRef.current = requestAnimationFrame(render)
+      // Trains move under a resting pointer: keep hover in sync with what's drawn.
+      const p = pointer.current
+      if (p && !dragging.current && now - lastHoverCheck > HOVER_REFRESH_MS) {
+        lastHoverCheck = now
+        const prev = hoveredRef.current
+        const hit = hitTest(p.x, p.y, topology)
+        if (!sameHit(hit, prev)) setHovered(hit)
+      }
+    }
+
+    // A throw in any layer must never stop the loop: log (throttled) and draw the next frame.
+    const render = () => {
+      try {
+        draw()
+      } catch (err) {
+        const t = performance.now()
+        if (t - lastErrorLog > 5000) {
+          lastErrorLog = t
+          console.error('map frame failed', err)
+        }
+      } finally {
+        animRef.current = requestAnimationFrame(render)
+      }
     }
 
     animRef.current = requestAnimationFrame(render)
     return () => cancelAnimationFrame(animRef.current)
-  }, []) // intentionally empty — loop reads stores directly
+  }, [setHovered]) // loop reads stores directly
 
   // ── Pointer events ──────────────────────────────────────────────────────
 
@@ -159,40 +214,45 @@ export function CanvasView() {
     if (e.button !== 0) return
     dragging.current = true
     lastMouse.current = { x: e.clientX, y: e.clientY }
-    setTrainMenu(null)
   }, [])
 
   const onMouseMove = useCallback((e: React.MouseEvent) => {
+    const rect = (e.currentTarget as HTMLCanvasElement).getBoundingClientRect()
+    const sx = e.clientX - rect.left
+    const sy = e.clientY - rect.top
+    pointer.current = { x: sx, y: sy }
     if (dragging.current) {
       const dx = e.clientX - lastMouse.current.x
       const dy = e.clientY - lastMouse.current.y
       vp.pan(dx, dy)
+      if (dx !== 0 || dy !== 0) userMoved.current = true
       lastMouse.current = { x: e.clientX, y: e.clientY }
-      setHovered(null)
+      if (hoveredRef.current) setHovered(null)
     } else {
-      // Hover hit-test
       const topo = useTopologyStore.getState().topology
-      const rt = useRuntimeStore.getState().runtime
-      if (!topo || !rt) return
-      const rect = (e.target as HTMLCanvasElement).getBoundingClientRect()
-      const sx = e.clientX - rect.left
-      const sy = e.clientY - rect.top
-      const hit = hitTest(sx, sy, topo, rt)
-      setHovered(hit)
-      storeSetHovered(hit)
+      if (!topo) return
+      const hit = hitTest(sx, sy, topo)
+      if (!sameHit(hit, hoveredRef.current) || (hit && hoveredRef.current && Math.hypot(hit.screenX - hoveredRef.current.screenX, hit.screenY - hoveredRef.current.screenY) > 24)) {
+        setHovered(hit)
+      }
     }
-  }, [storeSetHovered])
+  }, [setHovered])
 
   const onMouseUp = useCallback(() => { dragging.current = false }, [])
-  const onMouseLeave = useCallback(() => { dragging.current = false; setHovered(null) }, [])
+  const onMouseLeave = useCallback(() => {
+    dragging.current = false
+    pointer.current = null
+    setHovered(null)
+  }, [setHovered])
 
   const onWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault()
-    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect()
+    const rect = (e.currentTarget as HTMLCanvasElement).getBoundingClientRect()
     const sx = e.clientX - rect.left
     const sy = e.clientY - rect.top
     const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12
     vp.zoomAtPoint(factor, sx, sy)
+    userMoved.current = true
   }, [])
 
   const onClick = useCallback((e: React.MouseEvent) => {
@@ -201,22 +261,20 @@ export function CanvasView() {
     const topo = useTopologyStore.getState().topology
     const rt = useRuntimeStore.getState().runtime
     if (!topo || !rt) return
-    const rect = (e.target as HTMLCanvasElement).getBoundingClientRect()
+    const rect = (e.currentTarget as HTMLCanvasElement).getBoundingClientRect()
     const sx = e.clientX - rect.left
     const sy = e.clientY - rect.top
-    const hit = hitTest(sx, sy, topo, rt)
-    if (!hit) { setTrainMenu(null); return }
+    const hit = hitTest(sx, sy, topo)
+    if (!hit) { setSelectedTrain(null); return }
 
     if (hit.kind === 'train') {
-      setTrainMenu({ id: hit.id, x: sx, y: sy })
+      setSelectedTrain(hit.id)
     }
 
     if (hit.kind === 'switch') {
       const current = rt.switches.find(s => s.switch_id === hit.id)?.state ?? 'normal'
       const next = current === 'normal' ? 'reverse' : 'normal'
-      if (confirm(`Toggle ${hit.id}: ${current} → ${next}?`)) {
-        sendSwitchCommand(hit.id, next)
-      }
+      setPendingSwitch({ id: hit.id, from: current, to: next })
     }
 
     if (hit.kind === 'signal') {
@@ -226,11 +284,12 @@ export function CanvasView() {
       const next = aspects[i < 0 ? 0 : (i + 1) % aspects.length]
       sendSignalCommand(hit.id, next)
     }
-  }, [sendSwitchCommand, sendSignalCommand])
+  }, [setSelectedTrain, sendSignalCommand])
 
   // ── Touch events (mobile): 1 finger pans, 2 fingers pinch-zoom ───────────
   const onTouchStart = useCallback((e: React.TouchEvent) => {
     setHovered(null)
+    pointer.current = null
     touchMoved.current = false
     if (e.touches.length === 1) {
       lastTouch.current = { x: e.touches[0].clientX, y: e.touches[0].clientY }
@@ -239,10 +298,11 @@ export function CanvasView() {
       const dy = e.touches[0].clientY - e.touches[1].clientY
       pinchDist.current = Math.hypot(dx, dy)
     }
-  }, [])
+  }, [setHovered])
 
   const onTouchMove = useCallback((e: React.TouchEvent) => {
     touchMoved.current = true
+    userMoved.current = true
     if (e.touches.length === 1) {
       const t = e.touches[0]
       vp.pan(t.clientX - lastTouch.current.x, t.clientY - lastTouch.current.y)
@@ -271,10 +331,12 @@ export function CanvasView() {
       maxX: topo.bounds.max_x,
       maxY: topo.bounds.max_y,
     })
+    userMoved.current = false
   }, [])
 
   const zoomBy = useCallback((factor: number) => {
     vp.zoomAtPoint(factor, vp.width / 2, vp.height / 2)
+    userMoved.current = true
   }, [])
 
   // Double-click: fit to bounds
@@ -295,21 +357,21 @@ export function CanvasView() {
       } else if (e.key === '0' || e.key === 'Home') {
         e.preventDefault()
         fitMap()
+      } else if (e.key === 'Escape') {
+        setSelectedTrain(null)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [zoomBy, fitMap])
+  }, [zoomBy, fitMap, setSelectedTrain])
 
-  const { topology: topoForTooltip, } = useTopologyStore()
-  const { runtime: rtForTooltip } = useRuntimeStore()
-  const eventsOpen = useEventsStore((s) => s.panelOpen)
+  const showHover = hovered && topology && hasRuntime && !(hovered.kind === 'train' && hovered.id === selectedTrainId)
 
   return (
     <>
       <canvas
         ref={canvasRef}
-        style={{ display: 'block', width: '100%', height: '100%', touchAction: 'none', cursor: dragging.current ? 'grabbing' : 'crosshair' }}
+        style={{ display: 'block', width: '100%', height: '100%', touchAction: 'none', cursor: hovered ? 'pointer' : 'crosshair' }}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
@@ -322,131 +384,58 @@ export function CanvasView() {
         onTouchEnd={onTouchEnd}
         onTouchCancel={onTouchEnd}
       />
-      {hovered && topoForTooltip && rtForTooltip && (
-        <Tooltip hovered={hovered} topology={topoForTooltip} runtime={rtForTooltip} />
-      )}
-      {trainMenu && (
-        <TrainDispatchMenu
-          trainId={trainMenu.id}
-          x={trainMenu.x}
-          y={trainMenu.y}
-          onAction={(action, count) => { sendTrainCommand(trainMenu.id, action, count); setTrainMenu(null) }}
-          onClose={() => setTrainMenu(null)}
-        />
-      )}
+      {showHover && <MapHoverCard hovered={hovered} bounds={{ w: vp.width, h: vp.height }} />}
       <div
         data-help="zoom"
-        style={{
-          position: 'absolute',
-          right: eventsOpen ? 352 : 16,
-          bottom: 16,
-          zIndex: 40,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 4,
-        }}
+        role="group"
+        aria-label="Zoom"
+        className="absolute right-3 bottom-3 z-20 flex flex-col overflow-hidden rounded-md border border-border-strong bg-card"
       >
-        <ZoomBtn label="+" ariaLabel="Zoom in" title="Zoom in (+)" onClick={() => zoomBy(1.25)} />
-        <ZoomBtn label="−" ariaLabel="Zoom out" title="Zoom out (−)" onClick={() => zoomBy(1 / 1.25)} />
-        <ZoomBtn label="FIT" ariaLabel="Fit map" title="Fit map (0)" onClick={fitMap} />
+        <ZoomButton label="Zoom in" keys="+" onClick={() => zoomBy(1.25)}><Plus /></ZoomButton>
+        <ZoomButton label="Zoom out" keys="−" onClick={() => zoomBy(1 / 1.25)}><Minus /></ZoomButton>
+        <ZoomButton label="Fit line" keys="0" onClick={fitMap}><Maximize /></ZoomButton>
       </div>
+      <AlertDialog open={pendingSwitch != null} onOpenChange={(open) => { if (!open) setPendingSwitch(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Throw switch {pendingSwitch?.id}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Points move from <span className="text-foreground">{pendingSwitch?.from}</span> to{' '}
+              <span className="text-foreground">{pendingSwitch?.to}</span>. Routes over it are re-checked by the interlocking.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel size="sm">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              size="sm"
+              onClick={() => { if (pendingSwitch) void sendSwitchCommand(pendingSwitch.id, pendingSwitch.to) }}
+            >
+              Throw to {pendingSwitch?.to}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }
 
-function ZoomBtn({
-  label, ariaLabel, title, onClick,
-}: {
-  label: string
-  ariaLabel: string
-  title: string
-  onClick: () => void
-}) {
+function ZoomButton({ label, keys, onClick, children }: { label: string; keys: string; onClick: () => void; children: React.ReactNode }) {
   return (
-    <button
-      type="button"
-      aria-label={ariaLabel}
-      title={title}
-      onClick={onClick}
-      style={{
-        width: 36,
-        height: 36,
-        background: COLORS.BUTTON_BG,
-        color: COLORS.PANEL_TEXT,
-        border: `1px solid ${COLORS.PANEL_BORDER}`,
-        borderRadius: 3,
-        fontFamily: 'monospace',
-        fontSize: label.length > 1 ? 10 : 18,
-        fontWeight: 700,
-        letterSpacing: label.length > 1 ? '0.06em' : 0,
-        cursor: 'pointer',
-        lineHeight: 1,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-      }}
-    >
-      {label}
-    </button>
-  )
-}
-
-function TrainDispatchMenu({
-  trainId, x, y, onAction, onClose,
-}: {
-  trainId: string
-  x: number
-  y: number
-  onAction: (action: DispatchAction, count?: number) => void
-  onClose: () => void
-}) {
-  const train = useRuntimeStore((s) => s.runtime?.trains.find((t) => t.train_id === trainId))
-  const active = train?.dispatch_hold
-    ? 'HOLD at platform'
-    : train?.dispatch_express
-      ? 'EXPRESS (non-stop)'
-      : (train?.dispatch_skip_remaining ?? 0) > 0
-        ? `SKIP next ${train?.dispatch_skip_remaining}`
-        : 'normal'
-
-  return (
-    <div
-      onClick={(e) => e.stopPropagation()}
-      style={{
-        position: 'absolute', left: Math.min(x + 12, window.innerWidth - 200), top: y + 12, zIndex: 120,
-        background: COLORS.PANEL_BG, border: `1px solid ${COLORS.PANEL_BORDER}`,
-        borderRadius: 4, padding: 8, width: 184,
-        fontFamily: 'monospace', fontSize: 11, color: COLORS.PANEL_TEXT,
-        boxShadow: '0 6px 20px rgba(0,0,0,0.55)',
-      }}
-    >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
-        <span style={{ letterSpacing: '0.08em' }}>DISPATCH · {train?.label ?? trainId}</span>
-        <span onClick={onClose} style={{ cursor: 'pointer', color: COLORS.PANEL_TEXT_DIM }} title="Close">✕</span>
-      </div>
-      <div style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 10, marginBottom: 8 }}>state: {active}</div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-        <MenuBtn label="Hold at platform" hint="close the gap behind" onClick={() => onAction('hold')} />
-        <MenuBtn label="Express (non-stop)" hint="skip every stop" onClick={() => onAction('express')} />
-        <MenuBtn label="Skip next stop" hint="pass 1, then resume" onClick={() => onAction('skip', 1)} />
-        <MenuBtn label="Resume normal" hint="clear overrides" onClick={() => onAction('release')} />
-      </div>
-    </div>
-  )
-}
-
-function MenuBtn({ label, hint, onClick }: { label: string; hint: string; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        textAlign: 'left', background: COLORS.BUTTON_BG, color: COLORS.PANEL_TEXT,
-        border: `1px solid ${COLORS.PANEL_BORDER}`, borderRadius: 3, padding: '5px 8px',
-        fontFamily: 'monospace', fontSize: 11, cursor: 'pointer', lineHeight: 1.25,
-      }}
-    >
-      <div>{label}</div>
-      <div style={{ color: COLORS.PANEL_TEXT_DIM, fontSize: 9 }}>{hint}</div>
-    </button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={label}
+          onClick={onClick}
+          className="rounded-none text-foreground not-last:border-b not-last:border-border [&_svg:not([class*='size-'])]:size-3.5"
+        >
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="left">
+        {label} <Kbd>{keys}</Kbd>
+      </TooltipContent>
+    </Tooltip>
   )
 }
