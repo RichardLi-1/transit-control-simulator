@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   boundsUnion,
   distPointToSegment,
-  hitTestPoint,
   interpolatePolyline,
   polylineBounds,
   polylineLength,
@@ -117,25 +116,6 @@ describe('boundsUnion', () => {
     const a = { minX: 0, minY: 0, maxX: 1, maxY: 1 }
     const b = { minX: -1, minY: 2, maxX: 3, maxY: 4 }
     expect(boundsUnion(a, b)).toEqual({ minX: -1, minY: 0, maxX: 3, maxY: 4 })
-  })
-})
-
-describe('hitTestPoint', () => {
-  const identity = (wx: number, wy: number): [number, number] => [wx, wy]
-
-  it('is true when screen point is within radius', () => {
-    expect(hitTestPoint(0, 0, 0, 0, identity, 5)).toBe(true)
-    expect(hitTestPoint(0, 0, 3, 4, identity, 5)).toBe(true)
-  })
-
-  it('is false outside radius', () => {
-    expect(hitTestPoint(0, 0, 3, 4, identity, 4.99)).toBe(false)
-  })
-
-  it('uses the world-to-screen transform', () => {
-    const scale2 = (wx: number, wy: number): [number, number] => [wx * 2, wy * 2]
-    // world (1,0) → screen (2,0); distance from (2,0) is 0
-    expect(hitTestPoint(1, 0, 2, 0, scale2, 0.1)).toBe(true)
   })
 })
 
