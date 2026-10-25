@@ -25,7 +25,7 @@ def test_emergency_brake_and_release():
     assert tr.e_brake is False
 
 
-def test_slow_speed_cap():
+def test_slow_speed_cap_sets_restriction_without_clamping():
     reg = EventRegistry()
     lines = [_line()]
     tr = lines[0].trains[0]
@@ -40,10 +40,8 @@ def test_slow_speed_cap():
         speed_limit_kph=20.0,
     )
     assert getattr(tr, "_speed_cap_kph", None) == 20.0
-    assert tr.speed <= 20.0
-
-    tr.step(0.5)
-    assert tr.speed <= 20.0
+    # No teleport in speed: the ATO brakes to the cap (see test_interlocking_scenarios).
+    assert abs(tr.speed - 50.0) < 1e-9
 
     reg.tick(lines, 10.0, 10.0)
     assert not hasattr(tr, "_speed_cap_kph")

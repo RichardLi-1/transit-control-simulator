@@ -1,14 +1,19 @@
-"""Chainage helpers: absolute distance along the revenue loop (see docs/PROJECT.md)."""
+"""Chainage helpers on the revenue ring, in REAL metres.
+
+There is deliberately no "short-arc" helper here any more: deciding whether a train has
+"passed" a point by taking the shorter way round the ring is what made trains skip the
+whole inbound leg.  Progress is tracked with forward distances only (see ato.py).
+"""
 
 from __future__ import annotations
 
+from bisect import bisect_right
+
 import topology
 
-_EDGES = {e["id"]: e for e in topology.YUS_TOPOLOGY["edges"]}
-ROUTE_SEGMENTS: list[tuple[str, float]] = [
-    (eid, float(_EDGES[eid]["length"])) for eid in topology.YUS_TRAIN_ROUTE
-]
-ROUTE_LEN_M: float = sum(length for _, length in ROUTE_SEGMENTS)
+ROUTE_SEGMENTS: list[tuple[str, float]] = [(eid, length) for eid, _s, length in topology.ROUTE_SEGMENTS_M]
+ROUTE_LEN_M: float = topology.ROUTE_LENGTH_M
+_STARTS = [s for _eid, s, _l in topology.ROUTE_SEGMENTS_M]
 
 
 def wrap_chainage(s: float, route_len: float = ROUTE_LEN_M) -> float:
@@ -18,53 +23,35 @@ def wrap_chainage(s: float, route_len: float = ROUTE_LEN_M) -> float:
 
 
 def forward_distance(chainage_from: float, chainage_to: float, route_len: float = ROUTE_LEN_M) -> float:
-    """Distance travelling forward along the ring from chainage_from to chainage_to."""
-    a = wrap_chainage(chainage_from, route_len)
-    b = wrap_chainage(chainage_to, route_len)
-    d = b - a
-    if d < 0:
-        d += route_len
+    """Distance travelling forward along the ring from chainage_from to chainage_to, in [0, L)."""
+    d = (chainage_to - chainage_from) % route_len
     return float(d)
 
 
-def ahead_of_berth_m(train_front_m: float, berth_m: float, route_len: float = ROUTE_LEN_M) -> float:
-    """Metres the train nose is past the berth along the forward direction (0 until passed)."""
-    _, past = berth_approach(train_front_m, berth_m, route_len)
-    return past
-
-
-def berth_approach(
-    train_front_m: float,
-    berth_m: float,
-    route_len: float = ROUTE_LEN_M,
-) -> tuple[float, float]:
-    """Return (forward_distance_to_berth_m, metres_past_berth_m).
-
-    Uses the short arc on the ring so a train 5 m before a berth is not treated as
-    having wrapped past it.
-    """
-    ch = wrap_chainage(train_front_m, route_len)
-    b = wrap_chainage(berth_m, route_len)
-    dist_fwd = forward_distance(ch, b, route_len)
-    if dist_fwd <= route_len * 0.5:
-        return dist_fwd, 0.0
-    past = route_len - dist_fwd
-    return dist_fwd, past
-
-
 def chainage_to_edge(chainage: float, route_len: float = ROUTE_LEN_M) -> tuple[str, float]:
-    """Map wrapped chainage (m) to topology edge id and parametric offset along that edge in [0,1].
+    """Map a chainage (m) to (edge_id, fraction along that edge in [0, 1]).
 
-    Segment boundaries belong to the *next* edge (offset 0), matching berth chainage at
-  segment starts in stations.py — avoids drawing trains at offset 1.0 on the prior edge.
-    """
-    dist = wrap_chainage(chainage, route_len)
-    acc = 0.0
-    for eid, length in ROUTE_SEGMENTS:
-        if length <= 0:
-            continue
-        end = acc + length
-        if dist < end - 1e-9:
-            return eid, min(1.0, max(0.0, (dist - acc) / length))
-        acc = end
-    return ROUTE_SEGMENTS[-1][0], 1.0
+    Segment boundaries belong to the *next* edge (offset 0)."""
+    if route_len != ROUTE_LEN_M:   # foreign ring (tests) — scale onto ours
+        chainage = chainage / route_len * ROUTE_LEN_M
+    c = chainage % ROUTE_LEN_M
+    i = bisect_right(_STARTS, c) - 1
+    eid, start, length = topology.ROUTE_SEGMENTS_M[max(i, 0)]
+    return eid, min(1.0, max(0.0, (c - start) / length))
+
+
+def edges_spanned(c_from: float, c_to: float) -> list[str]:
+    """Edge ids covered going forward from chainage c_from to c_to (e.g. tail → nose)."""
+    L = ROUTE_LEN_M
+    a = c_from % L
+    span = (c_to - c_from) % L
+    segs = topology.ROUTE_SEGMENTS_M
+    i = max(bisect_right(_STARTS, a) - 1, 0)
+    out = [segs[i][0]]
+    covered = segs[i][1] + segs[i][2] - a        # distance from a to the end of edge i
+    n = len(segs)
+    while covered < span - 1e-9 and len(out) < n:
+        i = (i + 1) % n
+        out.append(segs[i][0])
+        covered += segs[i][2]
+    return out

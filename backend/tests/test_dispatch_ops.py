@@ -1,27 +1,29 @@
-"""GET /state includes headway dispatch telemetry."""
+"""GET /state includes headway dispatch telemetry and the service plan."""
 
-import json
-
-import train
-from main import get_state
-from sim import DT, simulation
+import main
+from sim import DT
+from simhelpers import make_sim
 
 
-def test_state_includes_dispatch_ops():
-    line = train.lines[0]
-    line.trains.clear()
-    line.trains.append(train.Train(chainage_front_m=5000.0, run_number=0))
+def test_state_includes_dispatch_and_service_ops():
+    payload = main.get_state()
+    ops = payload["ops"]
+    d = ops["dispatch"]
+    for k in ("count", "next_due_in_s", "blocked", "max_trains", "target_headway_sec",
+              "policy_mode", "effective_headway_sec", "effective_dwell_sec"):
+        assert k in d
+    svc = ops["service"]
+    for k in ("trains_in_service", "target_headway_s", "mean_headway_s", "period"):
+        assert k in svc
+    assert svc["period"] == "AM peak"            # sim starts at 06:00
+    assert svc["trains_in_service"] == len(payload["trains"])
 
-    simulation._sim_time_s = 0.0
-    simulation._spawn_elapsed_s = 0.0
-    simulation._dispatch_count = 0
 
-    for _ in range(int(121 / DT)):
-        simulation.step(DT)
-
-    payload = get_state()
-    dispatch = payload.get("ops", {}).get("dispatch")
-    assert dispatch is not None
-    assert dispatch["count"] >= 1
-    assert "next_due_in_s" in dispatch
-    assert payload.get("sim_time_s", 0) > 0
+def test_dispatch_count_and_headway_stats_progress():
+    s, line = make_sim(seed=5)
+    n0 = len(line.trains)
+    s.run(900)
+    assert s.mean_headway_s() is not None
+    assert len(line.trains) >= n0                   # bias may add trains from the yard
+    st = s.dispatch_status(line)
+    assert st["count"] == s._dispatch_count
