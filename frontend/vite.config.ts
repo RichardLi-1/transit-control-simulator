@@ -1,7 +1,9 @@
 /// <reference types="vitest/config" />
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { fileURLToPath, URL } from 'node:url'
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 import { answerHelp } from './src/help/answer'
 import type { TrainPosition } from './src/types/domain'
 
@@ -57,8 +59,9 @@ function helpApiPlugin(anthropicKey: string | undefined) {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   return {
-    plugins: [react(), helpApiPlugin(env.ANTHROPIC_API_KEY || undefined)],
+    plugins: [react(), tailwindcss(), helpApiPlugin(env.ANTHROPIC_API_KEY || undefined)],
     resolve: {
+      alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
       extensions: ['.tsx', '.ts', '.jsx', '.mjs', '.js', '.mts', '.json'],
     },
     test: {
