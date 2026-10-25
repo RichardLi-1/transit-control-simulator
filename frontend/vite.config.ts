@@ -72,6 +72,8 @@ export default defineConfig(({ mode }) => {
         '/commands': 'http://localhost:8000',
         '/health': 'http://localhost:8000',
         '/ops': 'http://localhost:8000',
+        '/sim': 'http://localhost:8000',
+        '/events': 'http://localhost:8000',
         '/ml': {
           target: 'http://localhost:8001',
           timeout: 120_000,
